@@ -710,6 +710,74 @@ impl TmpRepo {
         Ok(())
     }
 
+    /// Stash current changes
+    pub fn stash_push(&self) -> Result<(), GitAiError> {
+        let output = Command::new(crate::config::Config::get().git_cmd())
+            .current_dir(&self.path)
+            .args(&["stash", "push"])
+            .output()
+            .map_err(|e| GitAiError::Generic(format!("Failed to run git stash push: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // "No local changes to save" is not an error for our purposes
+            if !stderr.contains("No local changes to save") {
+                return Err(GitAiError::Generic(format!(
+                    "git stash push failed: {}",
+                    stderr
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Pop the most recent stash, returns true if there are conflicts
+    pub fn stash_pop(&self) -> Result<bool, GitAiError> {
+        let output = Command::new(crate::config::Config::get().git_cmd())
+            .current_dir(&self.path)
+            .args(&["stash", "pop"])
+            .output()
+            .map_err(|e| GitAiError::Generic(format!("Failed to run git stash pop: {}", e)))?;
+
+        // Check for conflicts in output
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let has_conflicts = stdout.contains("CONFLICT") || stderr.contains("CONFLICT");
+
+        if !output.status.success() && !has_conflicts {
+            return Err(GitAiError::Generic(format!(
+                "git stash pop failed: {}",
+                stderr
+            )));
+        }
+
+        Ok(has_conflicts)
+    }
+
+    /// Apply a specific stash, returns true if there are conflicts
+    pub fn stash_apply(&self, stash_ref: &str) -> Result<bool, GitAiError> {
+        let output = Command::new(crate::config::Config::get().git_cmd())
+            .current_dir(&self.path)
+            .args(&["stash", "apply", stash_ref])
+            .output()
+            .map_err(|e| GitAiError::Generic(format!("Failed to run git stash apply: {}", e)))?;
+
+        // Check for conflicts in output
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let has_conflicts = stdout.contains("CONFLICT") || stderr.contains("CONFLICT");
+
+        if !output.status.success() && !has_conflicts {
+            return Err(GitAiError::Generic(format!(
+                "git stash apply failed: {}",
+                stderr
+            )));
+        }
+
+        Ok(has_conflicts)
+    }
+
     /// Gets the commit SHA of the current HEAD
     pub fn head_commit_sha(&self) -> Result<String, GitAiError> {
         let head = self.repo_git2.head()?;

@@ -1429,6 +1429,134 @@ pub fn reconstruct_working_log_after_reset(
     Ok(())
 }
 
+/// Reconstruct working log after stash pop/apply
+///
+/// This handles the case where we stashed on commit A and are now popping/applying
+/// onto commit B. We need to create a working log that captures AI authorship from
+/// the stashed changes.
+///
+/// # Arguments
+/// * `repo` - Git repository
+/// * `target_commit_sha` - Current HEAD (where we're applying the stash)
+/// * `original_commit_sha` - HEAD when stash was created (from stash^1)
+/// * `human_author` - The human author identifier
+pub fn reconstruct_working_log_after_stash_apply(
+    repo: &Repository,
+    target_commit_sha: &str,
+    original_commit_sha: &str,
+    human_author: &str,
+) -> Result<(), GitAiError> {
+    debug_log(&format!(
+        "Reconstructing working log after stash apply from {} to {}",
+        original_commit_sha, target_commit_sha
+    ));
+
+    // Step 1: Check if working log exists for original commit
+    let original_working_log = repo
+        .storage
+        .working_log_for_base_commit(original_commit_sha);
+    let has_original_working_log = original_working_log
+        .read_all_checkpoints()
+        .map(|c| !c.is_empty())
+        .unwrap_or(false);
+
+    if !has_original_working_log {
+        debug_log("No working log found for original commit, nothing to reconstruct");
+        return Ok(());
+    }
+
+    // Step 2: Create temp commit representing working directory (staged + unstaged)
+    let working_tree_oid = capture_working_directory_as_tree(repo)?;
+    let working_tree = repo.find_tree(working_tree_oid)?;
+
+    let target_commit = repo.find_commit(target_commit_sha.to_string())?;
+    let temp_working_commit = repo.commit(
+        None,
+        &target_commit.author()?,
+        &target_commit.committer()?,
+        "Temporary commit for stash apply authorship reconstruction",
+        &working_tree,
+        &[&target_commit],
+    )?;
+
+    // Step 3: Create hanging commit with working dir tree but original commit as parent
+    let original_commit = repo.find_commit(original_commit_sha.to_string())?;
+    let hanging_commit_sha = repo.commit(
+        None,
+        &original_commit.author()?,
+        &original_commit.committer()?,
+        &format!(
+            "Hanging commit for stash apply: working dir with parent {}",
+            original_commit_sha
+        ),
+        &working_tree,
+        &[&original_commit],
+    )?;
+
+    // Step 4: Attach authorship log from original commit to hanging commit
+    create_authorship_log_for_hanging_commit(
+        repo,
+        original_commit_sha,
+        &hanging_commit_sha.to_string(),
+        human_author,
+    )?;
+
+    // Step 5: Reconstruct authorship via blame
+    let temp_commit_obj = repo.find_commit(temp_working_commit.to_string())?;
+    let target_commit_obj = repo.find_commit(target_commit_sha.to_string())?;
+
+    debug_log(&format!(
+        "Running reconstruct_authorship_from_diff: temp={}, target={}, hanging={}",
+        temp_working_commit, target_commit_sha, hanging_commit_sha
+    ));
+
+    let new_authorship_log = reconstruct_authorship_from_diff(
+        repo,
+        &temp_commit_obj,
+        &target_commit_obj,
+        &hanging_commit_sha.to_string(),
+    )?;
+
+    debug_log(&format!(
+        "Reconstructed authorship log has {} file attestations, {} prompts",
+        new_authorship_log.attestations.len(),
+        new_authorship_log.metadata.prompts.len()
+    ));
+
+    // Step 6: Convert to checkpoints
+    let mut checkpoints = new_authorship_log
+        .convert_to_checkpoints_for_squash(human_author)
+        .map_err(|e| {
+            GitAiError::Generic(format!(
+                "Failed to convert authorship log to checkpoints: {}",
+                e
+            ))
+        })?;
+
+    // Filter to keep only AI checkpoints - we don't track human-only changes in working logs
+    checkpoints.retain(|checkpoint| checkpoint.agent_id.is_some());
+
+    // Step 7: Persist blobs and write working log
+    let target_working_log = repo.storage.working_log_for_base_commit(target_commit_sha);
+
+    // Append to existing working log (don't reset - may have existing checkpoints)
+    for checkpoint in &mut checkpoints {
+        persist_checkpoint_blobs(repo, checkpoint, target_commit_sha)?;
+        target_working_log.append_checkpoint(checkpoint)?;
+    }
+
+    // Step 8: Cleanup hanging commits
+    delete_hanging_commit(repo, &hanging_commit_sha.to_string())?;
+    delete_hanging_commit(repo, &temp_working_commit.to_string())?;
+
+    debug_log(&format!(
+        "✓ Reconstructed {} AI checkpoints for stash apply",
+        checkpoints.len()
+    ));
+
+    Ok(())
+}
+
 /// Helper: Capture current working directory + index as a tree
 fn capture_working_directory_as_tree(repo: &Repository) -> Result<String, GitAiError> {
     let mut args = repo.global_args_for_exec();

@@ -5,3 +5,4 @@ pub mod merge_hooks;
 pub mod push_hooks;
 pub mod rebase_hooks;
 pub mod reset_hooks;
+pub mod stash_hooks;

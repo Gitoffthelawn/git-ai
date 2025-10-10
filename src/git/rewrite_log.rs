@@ -41,8 +41,14 @@ pub enum RewriteLogEvent {
     Commit {
         commit: CommitEvent,
     },
-    Stash {
-        stash: StashEvent,
+    StashCreate {
+        stash_create: StashCreateEvent,
+    },
+    StashApply {
+        stash_apply: StashApplyEvent,
+    },
+    StashPop {
+        stash_pop: StashPopEvent,
     },
     AuthorshipLogsSynced {
         authorship_logs_synced: AuthorshipLogsSyncedEvent,
@@ -136,8 +142,20 @@ impl RewriteLogEvent {
     }
 
     #[allow(dead_code)]
-    pub fn stash(event: StashEvent) -> Self {
-        Self::Stash { stash: event }
+    pub fn stash_create(event: StashCreateEvent) -> Self {
+        Self::StashCreate {
+            stash_create: event,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn stash_apply(event: StashApplyEvent) -> Self {
+        Self::StashApply { stash_apply: event }
+    }
+
+    #[allow(dead_code)]
+    pub fn stash_pop(event: StashPopEvent) -> Self {
+        Self::StashPop { stash_pop: event }
     }
 
     #[allow(dead_code)]
@@ -391,26 +409,50 @@ impl CommitEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StashEvent {
-    pub operation: StashOperation,
+pub struct StashCreateEvent {
+    pub original_head: String,
     pub stash_ref: Option<String>,
-    pub success: bool,
-    pub affected_files: Vec<String>,
 }
 
-impl StashEvent {
-    #[allow(dead_code)]
-    pub fn new(
-        operation: StashOperation,
-        stash_ref: Option<String>,
-        success: bool,
-        affected_files: Vec<String>,
-    ) -> Self {
+impl StashCreateEvent {
+    pub fn new(original_head: String, stash_ref: Option<String>) -> Self {
         Self {
-            operation,
+            original_head,
             stash_ref,
-            success,
-            affected_files,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StashApplyEvent {
+    pub stash_ref: String,
+    pub original_head: String,
+    pub target_head: String,
+}
+
+impl StashApplyEvent {
+    pub fn new(stash_ref: String, original_head: String, target_head: String) -> Self {
+        Self {
+            stash_ref,
+            original_head,
+            target_head,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StashPopEvent {
+    pub stash_ref: String,
+    pub original_head: String,
+    pub target_head: String,
+}
+
+impl StashPopEvent {
+    pub fn new(stash_ref: String, original_head: String, target_head: String) -> Self {
+        Self {
+            stash_ref,
+            original_head,
+            target_head,
         }
     }
 }
@@ -436,7 +478,7 @@ impl AuthorshipLogsSyncedEvent {
     }
 }
 
-/// Stash operation types
+/// Stash operation types (used internally for hook logic)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StashOperation {
     /// Create new stash
@@ -445,10 +487,6 @@ pub enum StashOperation {
     Apply,
     /// Pop stash (remove after applying)
     Pop,
-    /// Drop stash
-    Drop,
-    /// List stashes
-    List,
 }
 
 /// Serialize events to JSONL format (newest events first)
