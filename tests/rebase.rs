@@ -43,7 +43,7 @@ fn test_rebase_no_conflicts_identical_trees() {
 
     // Rebase feature onto default branch (hooks will handle authorship tracking)
     repo.git(&["checkout", "feature"]).unwrap();
-    let result = repo.git(&["rebase", &default_branch]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
 
     // Verify authorship was preserved for both files after rebase
     feature1.assert_lines_and_blame(lines![
