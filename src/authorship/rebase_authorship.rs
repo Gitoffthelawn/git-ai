@@ -71,8 +71,9 @@ pub fn rewrite_authorship_if_needed(
             ));
         }
         RewriteLogEvent::RebaseComplete { rebase_complete } => {
-            rewrite_authorship_after_rebase(
+            rewrite_authorship_after_rebase_v2(
                 repo,
+                &rebase_complete.original_head,
                 &rebase_complete.original_commits,
                 &rebase_complete.new_commits,
                 &commit_author,
@@ -360,176 +361,338 @@ pub fn prepare_working_log_after_squash(
     Ok(checkpoints)
 }
 
-/// Rewrite authorship logs after a rebase operation
+/// Get all file paths modified across a list of commits
+fn get_pathspecs_from_commits(
+    repo: &Repository,
+    commits: &[String],
+) -> Result<Vec<String>, GitAiError> {
+    let mut pathspecs = std::collections::HashSet::new();
+
+    for commit_sha in commits {
+        let files = repo.list_commit_files(commit_sha, None)?;
+        pathspecs.extend(files);
+    }
+
+    Ok(pathspecs.into_iter().collect())
+}
+
+/// Get file contents at a specific commit for given file paths
+fn get_file_contents_at_commit(
+    repo: &Repository,
+    commit_sha: &str,
+    file_paths: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    let mut file_contents = HashMap::new();
+
+    let commit = repo.find_commit(commit_sha.to_string())?;
+    let tree = commit.tree()?;
+
+    for file_path in file_paths {
+        let content = match tree.get_path(std::path::Path::new(file_path)) {
+            Ok(entry) => {
+                if let Ok(blob) = repo.find_blob(entry.id()) {
+                    let blob_content = blob.content().unwrap_or_default();
+                    String::from_utf8_lossy(&blob_content).to_string()
+                } else {
+                    String::new()
+                }
+            }
+            Err(_) => String::new(), // File doesn't exist in this commit
+        };
+
+        file_contents.insert(file_path.clone(), content);
+    }
+
+    Ok(file_contents)
+}
+
+/// Transform VirtualAttributions to match a new final state (single-source variant)
+fn transform_attributions_to_final_state(
+    source_va: &crate::authorship::virtual_attribution::VirtualAttributions,
+    final_state: HashMap<String, String>,
+    fallback_va: Option<&crate::authorship::virtual_attribution::VirtualAttributions>,
+) -> Result<crate::authorship::virtual_attribution::VirtualAttributions, GitAiError> {
+    use crate::authorship::attribution_tracker::{Attribution, AttributionTracker};
+    use crate::authorship::virtual_attribution::VirtualAttributions;
+
+    let tracker = AttributionTracker::new();
+    let ts = source_va.timestamp();
+    let repo = source_va.repo().clone();
+    let base_commit = source_va.base_commit().to_string();
+
+    let mut attributions = HashMap::new();
+    let mut file_contents = HashMap::new();
+
+    // Process each file in the final state
+    for (file_path, final_content) in final_state {
+        // Skip empty files (they don't exist in this commit yet)
+        // Keep the source attributions for when the file appears later
+        if final_content.is_empty() {
+            // Preserve original attributions and content for this file
+            if let (Some(src_attrs), Some(src_content)) = (
+                source_va.get_char_attributions(&file_path),
+                source_va.get_file_content(&file_path),
+            ) {
+                if let Some(src_line_attrs) = source_va.get_line_attributions(&file_path) {
+                    attributions.insert(
+                        file_path.clone(),
+                        (src_attrs.clone(), src_line_attrs.clone()),
+                    );
+                    file_contents.insert(file_path, src_content.clone());
+                }
+            }
+            continue;
+        }
+
+        // Get source attributions and content
+        let source_attrs = source_va.get_char_attributions(&file_path);
+        let source_content = source_va.get_file_content(&file_path);
+
+        // Transform to final state
+        let mut transformed_attrs = if let (Some(attrs), Some(content)) = (source_attrs, source_content)
+        {
+            // Use a dummy author for new insertions 
+            let dummy_author = "__DUMMY__";
+
+            let transformed =
+                tracker.update_attributions(content, &final_content, attrs, dummy_author, ts)?;
+
+            // Keep all attributions initially (including dummy ones)
+            transformed
+        } else {
+            Vec::new()
+        };
+        
+        // Try to restore attributions from fallback VA for "new" content that existed originally
+        if let Some(fallback) = fallback_va {
+            if let Some(fallback_content) = fallback.get_file_content(&file_path) {
+                if fallback_content == &final_content {
+                    // The final content matches the original content exactly!
+                    // Use the original attributions
+                    if let Some(fallback_attrs) = fallback.get_char_attributions(&file_path) {
+                        transformed_attrs = fallback_attrs.clone();
+                    }
+                } else {
+                    // Content doesn't match exactly, but we can still try to restore attributions
+                    // for matching substrings (handles commit splitting)
+                    let dummy_author = "__DUMMY__";
+                    for attr in &mut transformed_attrs {
+                        if attr.author_id == dummy_author {
+                            // This is new content - check if it exists in fallback
+                            let new_text = &final_content[attr.start..attr.end.min(final_content.len())];
+                            
+                            // Search for this text in the fallback content
+                            if let Some(pos) = fallback_content.find(new_text) {
+                                // Found matching text in original - check if we have attribution for it
+                                if let Some(fallback_attrs) = fallback.get_char_attributions(&file_path) {
+                                    for fallback_attr in fallback_attrs {
+                                        // Check if this fallback attribution covers the matched position
+                                        if fallback_attr.start <= pos && pos < fallback_attr.end {
+                                            // Restore the original author
+                                            attr.author_id = fallback_attr.author_id.clone();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Now filter out any remaining dummy attributions
+        let dummy_author = "__DUMMY__";
+        transformed_attrs = transformed_attrs
+            .into_iter()
+            .filter(|attr| attr.author_id != dummy_author)
+            .collect();
+
+        // Convert to line attributions
+        let line_attrs = crate::authorship::attribution_tracker::attributions_to_line_attributions(
+            &transformed_attrs,
+            &final_content,
+        );
+
+        attributions.insert(file_path.clone(), (transformed_attrs, line_attrs));
+        file_contents.insert(file_path, final_content);
+    }
+
+    Ok(VirtualAttributions::from_raw_data(
+        repo,
+        base_commit,
+        attributions,
+        file_contents,
+        ts,
+    ))
+}
+
+/// Rewrite authorship logs after a rebase operation using VirtualAttributions
 ///
-/// This function processes each commit mapping from a rebase and either copies
-/// or reconstructs the authorship log depending on whether the tree changed.
-///
-/// Handles different scenarios:
-/// - 1:1 mapping (normal rebase): Direct commit-to-commit authorship copy/reconstruction
-/// - N:M mapping where N > M (squashing/dropping): Reconstructs authorship from all original commits
+/// This is the new implementation that replaces the hanging commit / blame_in_context approach.
+/// It processes commits sequentially, transforming attributions through each commit in the rebase.
 ///
 /// # Arguments
 /// * `repo` - Git repository
+/// * `original_head` - SHA of the HEAD before rebase
 /// * `original_commits` - Vector of original commit SHAs (before rebase), oldest first
 /// * `new_commits` - Vector of new commit SHAs (after rebase), oldest first
-/// * `human_author` - The human author identifier
+/// * `_human_author` - The human author identifier (unused in this implementation)
 ///
 /// # Returns
 /// Ok if all commits were processed successfully
-pub fn rewrite_authorship_after_rebase(
+pub fn rewrite_authorship_after_rebase_v2(
     repo: &Repository,
-    original_commits: &[String],
-    new_commits: &[String],
-    human_author: &str,
-) -> Result<(), GitAiError> {
-    // Detect the mapping type
-    if original_commits.len() > new_commits.len() {
-        // Many-to-few mapping (squashing or dropping commits)
-        debug_log(&format!(
-            "Detected many-to-few rebase: {} original -> {} new commits",
-            original_commits.len(),
-            new_commits.len()
-        ));
-
-        // Handle squashing: reconstruct authorship for each new commit from the
-        // corresponding range of original commits
-        handle_squashed_rebase(repo, original_commits, new_commits, human_author)?;
-    } else if original_commits.len() < new_commits.len() {
-        // Few-to-many mapping (commit splitting or adding commits)
-        debug_log(&format!(
-            "Detected few-to-many rebase: {} original -> {} new commits",
-            original_commits.len(),
-            new_commits.len()
-        ));
-
-        // Handle splitting: use the head of originals as source for all new commits
-        // This preserves attribution when commits are split or new commits are added
-        handle_split_rebase(repo, original_commits, new_commits, human_author)?;
-    } else {
-        // 1:1 mapping (normal rebase)
-        debug_log(&format!(
-            "Detected 1:1 rebase: {} commits",
-            original_commits.len()
-        ));
-
-        // Process each old -> new commit mapping
-        for (old_sha, new_sha) in original_commits.iter().zip(new_commits.iter()) {
-            rewrite_single_commit_authorship(repo, old_sha, new_sha, human_author)?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Handle squashed rebase where multiple commits become fewer commits
-///
-/// This reconstructs authorship by using the comprehensive squash logic
-/// that properly traces through all original commits to preserve authorship.
-fn handle_squashed_rebase(
-    repo: &Repository,
+    original_head: &str,
     original_commits: &[String],
     new_commits: &[String],
     _human_author: &str,
 ) -> Result<(), GitAiError> {
-    // For squashing, we use the last (most recent) original commit as the source
-    // since it contains all the accumulated changes from previous commits
-    let head_of_originals = original_commits
-        .last()
-        .ok_or_else(|| GitAiError::Generic("No original commits found".to_string()))?;
-
-    debug_log(&format!(
-        "Using {} as head of original commits for squash reconstruction",
-        head_of_originals
-    ));
-
-    // Process each new commit using the comprehensive squash logic
-    // This handles the complex case where files from multiple commits need to be blamed
-    for new_sha in new_commits {
-        debug_log(&format!(
-            "Reconstructing authorship for squashed commit: {}",
-            new_sha
-        ));
-
-        // Use the existing squash logic which properly handles multiple commits
-        // by finding the common base and creating a hanging commit with all files
-        let _ = rewrite_authorship_after_squash_or_rebase(
-            repo,
-            "", // branch name not used in the logic
-            head_of_originals,
-            new_sha,
-            false, // not a dry run
-        )?;
+    // Handle edge case: no commits to process
+    if new_commits.is_empty() {
+        return Ok(());
     }
 
-    Ok(())
-}
+    // Step 1: Extract pathspecs from all original commits
+    let pathspecs = get_pathspecs_from_commits(repo, original_commits)?;
 
-/// Handle split rebase where commits are split or new commits are added
-///
-/// For split rebases, we attempt reconstruction but handle cases where files
-/// have been restructured or renamed gracefully.
-fn handle_split_rebase(
-    repo: &Repository,
-    original_commits: &[String],
-    new_commits: &[String],
-    human_author: &str,
-) -> Result<(), GitAiError> {
-    // For splitting, we use the last (most recent) original commit as the source
-    // since it contains all the accumulated changes from previous commits
-    let head_of_originals = original_commits
-        .last()
-        .ok_or_else(|| GitAiError::Generic("No original commits found".to_string()))?;
+    if pathspecs.is_empty() {
+        // No files were modified, nothing to do
+        return Ok(());
+    }
 
     debug_log(&format!(
-        "Using {} as head of original commits for split/add reconstruction",
-        head_of_originals
+        "Processing rebase: {} files modified across {} original commits -> {} new commits",
+        pathspecs.len(),
+        original_commits.len(),
+        new_commits.len()
     ));
 
-    // Process each new commit
-    // When commits are split with file restructuring, we try multiple approaches
-    for new_sha in new_commits {
-        debug_log(&format!(
-            "Reconstructing authorship for split/added commit: {}",
-            new_sha
-        ));
+    // Step 2: Create VirtualAttributions from original_head (before rebase)
+    let repo_clone = repo.clone();
+    let original_head_clone = original_head.to_string();
+    let pathspecs_clone = pathspecs.clone();
 
-        // First try: use squash logic (works if files have same names)
-        let squash_result = rewrite_authorship_after_squash_or_rebase(
-            repo,
-            "", // branch name not used in the logic
-            head_of_originals,
-            new_sha,
-            false, // not a dry run
-        );
+    let mut current_va = smol::block_on(async {
+        crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
+            repo_clone,
+            original_head_clone,
+            &pathspecs_clone,
+        )
+        .await
+    })?;
 
-        if squash_result.is_err() {
-            // If squash logic fails (e.g., files don't exist), try simpler reconstruction
-            debug_log(&format!(
-                "Squash logic failed for {}, trying simple reconstruction",
-                new_sha
-            ));
-
-            // Try each original commit to see if any works
-            let mut reconstructed = false;
-            for orig_sha in original_commits {
-                if let Ok(_) =
-                    rewrite_single_commit_authorship(repo, orig_sha, new_sha, human_author)
-                {
-                    reconstructed = true;
-                    break;
+    
+    // Clone the original VA to use as a fallback for restoring attributions
+    // This handles commit splitting where content from original_head gets re-applied
+    let original_va_for_fallback = {
+        let mut attrs = HashMap::new();
+        let mut contents = HashMap::new();
+        for file in current_va.files() {
+            if let Some(char_attrs) = current_va.get_char_attributions(&file) {
+                if let Some(line_attrs) = current_va.get_line_attributions(&file) {
+                    attrs.insert(file.clone(), (char_attrs.clone(), line_attrs.clone()));
                 }
             }
-
-            if !reconstructed {
-                debug_log(&format!(
-                    "Could not reconstruct authorship for {} - files may have been restructured",
-                    new_sha
-                ));
-                // For restructured files, we can't reliably reconstruct authorship
-                // This is ok - the commit just won't have AI authorship attribution
+            if let Some(content) = current_va.get_file_content(&file) {
+                contents.insert(file, content.clone());
             }
         }
+        crate::authorship::virtual_attribution::VirtualAttributions::from_raw_data(
+            current_va.repo().clone(),
+            current_va.base_commit().to_string(),
+            attrs,
+            contents,
+            current_va.timestamp(),
+        )
+    };
+
+    // Step 3: Process each new commit in order (oldest to newest)
+    for (idx, new_commit) in new_commits.iter().enumerate() {
+        debug_log(&format!(
+            "Processing commit {}/{}: {}",
+            idx + 1,
+            new_commits.len(),
+            new_commit
+        ));
+
+        // Get the DIFF for this commit (what actually changed)
+        let commit_obj = repo.find_commit(new_commit.clone())?;
+        let parent_obj = commit_obj.parent(0)?;
+        
+        let commit_tree = commit_obj.tree()?;
+        let parent_tree = parent_obj.tree()?;
+        
+        let diff = repo.diff_tree_to_tree(Some(&parent_tree), Some(&commit_tree), None, None)?;
+        
+        // Build new content by applying the diff to current content
+        let mut new_content_state = HashMap::new();
+        
+        // Start with all files from current VA
+        for file in current_va.files() {
+            if let Some(content) = current_va.get_file_content(&file) {
+                new_content_state.insert(file, content.clone());
+            }
+        }
+        
+        
+        // Apply changes from this commit's diff
+        for delta in diff.deltas() {
+            let file_path = delta.new_file().path()
+                .or(delta.old_file().path())
+                .ok_or_else(|| GitAiError::Generic("File path not available".to_string()))?;
+            let file_path_str = file_path.to_string_lossy().to_string();
+            
+            // Only process files we're tracking
+            if !pathspecs.contains(&file_path_str) {
+                continue;
+            }
+            
+            // Get new content for this file from the commit
+            let new_content = if let Ok(entry) = commit_tree.get_path(file_path) {
+                if let Ok(blob) = repo.find_blob(entry.id()) {
+                    let content = blob.content()?;
+                    String::from_utf8_lossy(&content).to_string()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            
+            new_content_state.insert(file_path_str, new_content);
+        }
+        
+        // Transform attributions based on the new content state
+        // Pass original VA to restore attributions for content that existed originally
+        current_va = transform_attributions_to_final_state(&current_va, new_content_state.clone(), Some(&original_va_for_fallback))?;
+
+        // Convert to AuthorshipLog, but filter to only files that exist in this commit
+        let mut authorship_log = current_va.to_authorship_log()?;
+        
+        // Filter out attestations for files that don't exist in this commit (empty files)
+        authorship_log.attestations.retain(|attestation| {
+            if let Some(content) = new_content_state.get(&attestation.file_path) {
+                !content.is_empty()
+            } else {
+                false
+            }
+        });
+
+        authorship_log.metadata.base_commit_sha = new_commit.clone();
+
+        // Save authorship log
+        let authorship_json = authorship_log
+            .serialize_to_string()
+            .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
+
+        crate::git::refs::notes_add(repo, new_commit, &authorship_json)?;
+
+        debug_log(&format!(
+            "Saved authorship log for commit {} ({} files)",
+            new_commit,
+            authorship_log.attestations.len()
+        ));
     }
 
     Ok(())

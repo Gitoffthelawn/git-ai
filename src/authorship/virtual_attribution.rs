@@ -144,6 +144,11 @@ impl VirtualAttributions {
         self.file_contents.get(file_path)
     }
 
+    /// Get a reference to the repository
+    pub fn repo(&self) -> &Repository {
+        &self.repo
+    }
+
     /// Alias for new_for_base_commit for clarity
     pub async fn from_commit(
         repo: Repository,
@@ -385,6 +390,23 @@ impl VirtualAttributions {
         }
 
         Ok((virtual_attrs, authorship_log))
+    }
+
+    /// Create VirtualAttributions from raw components (used for transformations)
+    pub fn from_raw_data(
+        repo: Repository,
+        base_commit: String,
+        attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)>,
+        file_contents: HashMap<String, String>,
+        ts: u128,
+    ) -> Self {
+        VirtualAttributions {
+            repo,
+            base_commit,
+            attributions,
+            file_contents,
+            ts,
+        }
     }
 
     /// Convert this VirtualAttributions to an AuthorshipLog
