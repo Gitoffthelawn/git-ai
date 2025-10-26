@@ -1767,115 +1767,166 @@ pub fn walk_commits_to_base(
     Ok(commits)
 }
 
+/// Get all file paths changed between two commits
+fn get_files_changed_between_commits(
+    repo: &Repository,
+    from_commit: &str,
+    to_commit: &str,
+) -> Result<Vec<String>, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.push("diff".to_string());
+    args.push("--name-only".to_string());
+    args.push(from_commit.to_string());
+    args.push(to_commit.to_string());
+
+    let output = crate::git::repository::exec_git(&args)?;
+    let stdout = String::from_utf8(output.stdout)?;
+
+    let files: Vec<String> = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .collect();
+
+    Ok(files)
+}
+
 /// Reconstruct working log after a reset that preserves working directory
 ///
 /// This handles --soft, --mixed, and --merge resets where we move HEAD backward
 /// but keep the working directory state. We need to create a working log that
 /// captures AI authorship from the "unwound" commits plus any existing uncommitted changes.
+///
+/// Uses VirtualAttributions to merge AI authorship from old_head (with working log) and
+/// target_commit, generating INITIAL checkpoints that seed the AI state on target_commit.
 pub fn reconstruct_working_log_after_reset(
     repo: &Repository,
     target_commit_sha: &str, // Where we reset TO
     old_head_sha: &str,      // Where HEAD was BEFORE reset
-    human_author: &str,
+    _human_author: &str,
+    user_pathspecs: Option<&[String]>, // Optional user-specified pathspecs for partial reset
 ) -> Result<(), GitAiError> {
-    // Cache for foreign prompts to avoid repeated grepping
-    let mut foreign_prompts_cache: HashMap<
-        String,
-        Option<crate::authorship::authorship_log::PromptRecord>,
-    > = HashMap::new();
     debug_log(&format!(
         "Reconstructing working log after reset from {} to {}",
         old_head_sha, target_commit_sha
     ));
 
-    // Step 1: Create a temporary commit representing the working directory (staged + unstaged)
-    // This has the target commit as parent
-    let working_tree_oid = capture_working_directory_as_tree(repo)?;
-    let working_tree = repo.find_tree(working_tree_oid)?;
+    // Step 1: Get all files changed between target and old_head
+    let all_changed_files =
+        get_files_changed_between_commits(repo, target_commit_sha, old_head_sha)?;
 
-    let target_commit = repo.find_commit(target_commit_sha.to_string())?;
-    let temp_working_commit = repo.commit(
-        None,
-        &target_commit.author()?,
-        &target_commit.committer()?,
-        "Temporary commit representing working directory after reset",
-        &working_tree,
-        &[&target_commit],
-    )?;
+    // Filter to user pathspecs if provided
+    let pathspecs: Vec<String> = if let Some(user_paths) = user_pathspecs {
+        all_changed_files
+            .into_iter()
+            .filter(|f| user_paths.iter().any(|p| f == p || f.starts_with(p)))
+            .collect()
+    } else {
+        all_changed_files
+    };
 
-    // Step 2: Create hanging commit with the working directory tree but old_head as parent
-    // This preserves AI authorship from old_head while having working directory content
-    let old_head_commit = repo.find_commit(old_head_sha.to_string())?;
-    let hanging_commit_sha = repo.commit(
-        None,
-        &old_head_commit.author()?,
-        &old_head_commit.committer()?,
-        &format!(
-            "Hanging commit for reset: working dir with parent {}",
-            old_head_sha
-        ),
-        &working_tree,       // Same tree as working directory
-        &[&old_head_commit], // But parent is old_head (preserves AI context)
-    )?;
-
-    // Step 3: Attach authorship log from old HEAD to hanging commit
-    // This is essential so that blame can find the AI authorship
-    create_authorship_log_for_hanging_commit(
-        repo,
-        old_head_sha,
-        &hanging_commit_sha.to_string(),
-        human_author,
-    )?;
-
-    // Step 4: Reconstruct authorship via blame
-    // Compare: working directory (temp) vs target
-    // Context: hanging commit (which has old_head's AI authorship)
-    let temp_commit_obj = repo.find_commit(temp_working_commit.to_string())?;
-    let target_commit_obj = repo.find_commit(target_commit_sha.to_string())?;
-
-    debug_log(&format!(
-        "Running reconstruct_authorship_from_diff: temp={}, target={}, hanging={}",
-        temp_working_commit, target_commit_sha, hanging_commit_sha
-    ));
-
-    let new_authorship_log = reconstruct_authorship_from_diff(
-        repo,
-        &temp_commit_obj,
-        &target_commit_obj,
-        &hanging_commit_sha.to_string(),
-        &mut AuthorshipLogCache::new(),
-        &mut foreign_prompts_cache,
-    )?;
-
-    debug_log(&format!(
-        "Reconstructed authorship log has {} file attestations, {} prompts",
-        new_authorship_log.attestations.len(),
-        new_authorship_log.metadata.prompts.len()
-    ));
-    eprintln!("new_authorship_log: {:?}", new_authorship_log);
-
-    // Step 4: Build file contents map from index
-    use std::collections::HashMap;
-    let mut file_contents: HashMap<String, String> = HashMap::new();
-    for file_attestation in &new_authorship_log.attestations {
-        // Read from index using git show :path
-        let mut args = repo.global_args_for_exec();
-        args.push("show".to_string());
-        args.push(format!(":{}", file_attestation.file_path));
-
-        let output = crate::git::repository::exec_git(&args)?;
-        let file_content = String::from_utf8(output.stdout).map_err(|_| {
-            GitAiError::Generic(format!(
-                "Failed to read file: {}",
-                file_attestation.file_path
-            ))
-        })?;
-        file_contents.insert(file_attestation.file_path.clone(), file_content);
+    if pathspecs.is_empty() {
+        debug_log("No files changed between commits, nothing to reconstruct");
+        // Still delete old working log
+        repo.storage
+            .delete_working_log_for_base_commit(old_head_sha)?;
+        return Ok(());
     }
 
-    // Step 5: Convert to checkpoints
-    let mut checkpoints = new_authorship_log
-        .convert_to_checkpoints_for_squash(&file_contents)
+    debug_log(&format!(
+        "Processing {} files for reset authorship reconstruction",
+        pathspecs.len()
+    ));
+
+    // Step 2: Build VirtualAttributions from old_head with working log applied
+    // from_working_log_for_commit now runs blame (gets ALL prompts) AND applies working log
+    let repo_clone = repo.clone();
+    let old_head_clone = old_head_sha.to_string();
+    let pathspecs_clone = pathspecs.clone();
+
+    let old_head_va = smol::block_on(async {
+        let (va, _) = crate::authorship::virtual_attribution::VirtualAttributions::from_working_log_for_commit(
+            repo_clone,
+            old_head_clone,
+            &pathspecs_clone,
+            None, // Don't need human_author for this step
+        )
+        .await?;
+        Ok::<_, GitAiError>(va)
+    })?;
+
+    debug_log(&format!(
+        "Built old_head VA with {} files, {} prompts",
+        old_head_va.files().len(),
+        old_head_va.prompts().len()
+    ));
+
+    // Step 3: Build VirtualAttributions from target_commit
+    let repo_clone = repo.clone();
+    let target_clone = target_commit_sha.to_string();
+    let pathspecs_clone = pathspecs.clone();
+
+    let target_va = smol::block_on(async {
+        crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
+            repo_clone,
+            target_clone,
+            &pathspecs_clone,
+        )
+        .await
+    })?;
+
+    debug_log(&format!(
+        "Built target VA with {} files, {} prompts",
+        target_va.files().len(),
+        target_va.prompts().len()
+    ));
+
+    // Step 4: Build final state from working directory
+    use std::collections::HashMap;
+    let mut final_state: HashMap<String, String> = HashMap::new();
+
+    let workdir = repo.workdir()?;
+    for file_path in &pathspecs {
+        let abs_path = workdir.join(file_path);
+        let content = if abs_path.exists() {
+            std::fs::read_to_string(&abs_path).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        final_state.insert(file_path.clone(), content);
+    }
+
+    debug_log(&format!(
+        "Read {} files from working directory",
+        final_state.len()
+    ));
+
+    // Step 5: Merge VAs favoring old_head to preserve uncommitted AI changes
+    // old_head (with working log) wins overlaps, target fills gaps
+    let merged_va = crate::authorship::virtual_attribution::merge_attributions_favoring_first(
+        old_head_va,
+        target_va,
+        final_state.clone(),
+    )?;
+
+    debug_log(&format!(
+        "Merged VAs, result has {} files",
+        merged_va.files().len()
+    ));
+
+    // Step 6: Convert merged VA to AuthorshipLog
+    let mut authorship_log = merged_va.to_authorship_log()?;
+    authorship_log.metadata.base_commit_sha = target_commit_sha.to_string();
+
+    debug_log(&format!(
+        "Converted to authorship log with {} attestations, {} prompts",
+        authorship_log.attestations.len(),
+        authorship_log.metadata.prompts.len()
+    ));
+
+    // Step 7: Convert to INITIAL checkpoints and write working log
+    let mut checkpoints = authorship_log
+        .convert_to_checkpoints_for_squash(&final_state)
         .map_err(|e| {
             GitAiError::Generic(format!(
                 "Failed to convert authorship log to checkpoints: {}",
@@ -1886,9 +1937,10 @@ pub fn reconstruct_working_log_after_reset(
     // Filter to keep only AI checkpoints - we don't track human-only changes in working logs
     checkpoints.retain(|checkpoint| checkpoint.kind != CheckpointKind::Human);
 
-    // Step 6: Persist blobs and write working log
+    debug_log(&format!("Generated {} AI checkpoints", checkpoints.len()));
+
+    // Step 8: Write to working log for target_commit
     let new_working_log = repo.storage.working_log_for_base_commit(target_commit_sha);
-    // reset first (can have stuff in it from before if you're operating on HEAD)
     new_working_log.reset_working_log()?;
 
     for checkpoint in &mut checkpoints {
@@ -1896,30 +1948,17 @@ pub fn reconstruct_working_log_after_reset(
         new_working_log.append_checkpoint(checkpoint)?;
     }
 
-    // Step 7: Cleanup hanging commits
-    delete_hanging_commit(repo, &hanging_commit_sha.to_string())?;
-    delete_hanging_commit(repo, &temp_working_commit.to_string())?;
-
     // Delete old working log
     repo.storage
         .delete_working_log_for_base_commit(old_head_sha)?;
 
     debug_log(&format!(
-        "Created {} checkpoints in working log for {}",
+        "✓ Created {} checkpoints in working log for {}",
         checkpoints.len(),
         target_commit_sha
     ));
 
     Ok(())
-}
-
-/// Helper: Capture current working directory + index as a tree
-fn capture_working_directory_as_tree(repo: &Repository) -> Result<String, GitAiError> {
-    let mut args = repo.global_args_for_exec();
-    args.push("write-tree".to_string());
-    let output = crate::git::repository::exec_git(&args)?;
-    let tree_oid = String::from_utf8(output.stdout)?.trim().to_string();
-    Ok(tree_oid)
 }
 
 /// Helper: Persist file blobs for a checkpoint (reuse from prepare_working_log_after_squash)
@@ -1956,94 +1995,6 @@ fn persist_checkpoint_blobs(
         combined_hasher.update(hash.as_bytes());
     }
     checkpoint.diff = format!("{:x}", combined_hasher.finalize());
-
-    Ok(())
-}
-
-/// Create an authorship log for the hanging commit by combining the existing
-/// authorship log and working log from the old HEAD commit
-fn create_authorship_log_for_hanging_commit(
-    repo: &Repository,
-    old_head_sha: &str,
-    hanging_commit_sha: &str,
-    human_author: &str,
-) -> Result<(), GitAiError> {
-    debug_log(&format!(
-        "Creating authorship log for hanging commit {} from old HEAD {}",
-        hanging_commit_sha, old_head_sha
-    ));
-
-    // Step 1: Try to get existing authorship log from old HEAD
-    let mut authorship_log = match get_reference_as_authorship_log_v3(repo, old_head_sha) {
-        Ok(log) => {
-            debug_log(&format!(
-                "Found existing authorship log for {} with {} attestations",
-                old_head_sha,
-                log.attestations.len()
-            ));
-            log
-        }
-        Err(_) => {
-            debug_log(&format!("No existing authorship log for {}", old_head_sha));
-            AuthorshipLog::new()
-        }
-    };
-
-    // Step 2: Get working log for old HEAD (if exists)
-    let working_log = repo.storage.working_log_for_base_commit(old_head_sha);
-    let checkpoints = match working_log.read_all_checkpoints() {
-        Ok(checkpoints) if !checkpoints.is_empty() => {
-            debug_log(&format!(
-                "Found {} checkpoints in working log for {}",
-                checkpoints.len(),
-                old_head_sha
-            ));
-            checkpoints
-        }
-        _ => {
-            debug_log(&format!("No working log for {}", old_head_sha));
-            Vec::new()
-        }
-    };
-
-    // Step 3: Apply checkpoints to authorship log (like post_commit does)
-    if !checkpoints.is_empty() {
-        let mut session_additions = std::collections::HashMap::new();
-        let mut session_deletions = std::collections::HashMap::new();
-
-        for checkpoint in &checkpoints {
-            authorship_log.apply_checkpoint(
-                checkpoint,
-                Some(human_author),
-                &mut session_additions,
-                &mut session_deletions,
-            );
-        }
-
-        authorship_log.finalize(&session_additions, &session_deletions);
-
-        debug_log(&format!(
-            "Applied working log checkpoints, now have {} attestations, {} prompts",
-            authorship_log.attestations.len(),
-            authorship_log.metadata.prompts.len()
-        ));
-    }
-
-    // Step 4: Set the base_commit_sha to the hanging commit
-    authorship_log.metadata.base_commit_sha = hanging_commit_sha.to_string();
-
-    // Step 5: Save the authorship log to the hanging commit
-    let authorship_json = authorship_log
-        .serialize_to_string()
-        .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
-
-    crate::git::refs::notes_add(repo, hanging_commit_sha, &authorship_json)?;
-
-    debug_log(&format!(
-        "Attached authorship log to hanging commit {} with {} attestations",
-        hanging_commit_sha,
-        authorship_log.attestations.len()
-    ));
 
     Ok(())
 }

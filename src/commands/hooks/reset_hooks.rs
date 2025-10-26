@@ -196,6 +196,7 @@ fn handle_reset_preserve_working_dir(
         target_commit_sha,
         old_head_sha,
         human_author,
+        None, // No user-specified pathspecs for regular resets
     ) {
         Ok(_) => {
             debug_log(&format!(
@@ -235,6 +236,17 @@ fn handle_reset_pathspec_preserve_working_dir(
         ));
     }
 
+    // For pathspec resets, HEAD doesn't move, so we're reconstructing for the current HEAD
+    // but only for the specified pathspecs
+
+    // Check if this is a backward reset
+    let is_backward = is_ancestor(repository, target_commit_sha, old_head_sha);
+
+    if !is_backward {
+        debug_log("Pathspec reset forward or to unrelated commit, no reconstruction needed");
+        return;
+    }
+
     // Backup existing working log for HEAD (non-pathspec files)
     let working_log = repository.storage.working_log_for_base_commit(old_head_sha);
     let existing_checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
@@ -252,36 +264,37 @@ fn handle_reset_pathspec_preserve_working_dir(
         }
     }
 
-    // Run the 3-way merge reconstruction using handle_reset_preserve_working_dir
-    // This will create a working log for target_commit_sha
-    handle_reset_preserve_working_dir(
+    // Reconstruct working log for pathspec files only
+    // Pass pathspecs to limit reconstruction to only those files
+    match crate::authorship::rebase_authorship::reconstruct_working_log_after_reset(
         repository,
-        old_head_sha,
         target_commit_sha,
-        target_commit_sha, // Pretend HEAD moved to target
+        old_head_sha,
         human_author,
-    );
+        Some(pathspecs), // Pass pathspecs to limit reconstruction
+    ) {
+        Ok(_) => {
+            debug_log(&format!(
+                "✓ Reconstructed working log for pathspec reset: {:?}",
+                pathspecs
+            ));
+        }
+        Err(e) => {
+            debug_log(&format!(
+                "Failed to reconstruct working log for pathspec reset: {}",
+                e
+            ));
+            return;
+        }
+    }
 
-    // Now read the working log created for target_commit_sha
+    // Read the newly created working log for target_commit_sha
     let target_working_log = repository
         .storage
         .working_log_for_base_commit(target_commit_sha);
-    let target_checkpoints = target_working_log
+    let pathspec_checkpoints = target_working_log
         .read_all_checkpoints()
         .unwrap_or_default();
-
-    // Filter target checkpoints to only include pathspec files
-    let mut pathspec_checkpoints = Vec::new();
-    for mut checkpoint in target_checkpoints {
-        checkpoint.entries.retain(|entry| {
-            pathspecs
-                .iter()
-                .any(|pathspec| entry.file == *pathspec || entry.file.starts_with(pathspec))
-        });
-        if !checkpoint.entries.is_empty() {
-            pathspec_checkpoints.push(checkpoint);
-        }
-    }
 
     // Merge the two sets of checkpoints: non-pathspec from old + pathspec from new
     let pathspec_count = pathspec_checkpoints.len();

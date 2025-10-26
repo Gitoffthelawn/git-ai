@@ -56,7 +56,78 @@ impl VirtualAttributions {
             virtual_attrs.add_pathspecs_concurrent(pathspecs).await?;
         }
 
+        // After running blame, discover and load any missing prompts from blamed commits
+        virtual_attrs.discover_and_load_foreign_prompts()?;
+
         Ok(virtual_attrs)
+    }
+
+    /// Discover and load prompts from blamed commits that aren't in our prompts map
+    fn discover_and_load_foreign_prompts(&mut self) -> Result<(), GitAiError> {
+        use std::collections::HashSet;
+
+        // Collect all unique author_ids from attributions
+        let mut all_author_ids: HashSet<String> = HashSet::new();
+        for (_file_path, (char_attrs, _line_attrs)) in &self.attributions {
+            for attr in char_attrs {
+                all_author_ids.insert(attr.author_id.clone());
+            }
+        }
+
+        // Find missing author_ids (not in prompts map)
+        let missing_ids: Vec<String> = all_author_ids
+            .into_iter()
+            .filter(|id| !self.prompts.contains_key(id))
+            .collect();
+
+        if missing_ids.is_empty() {
+            return Ok(());
+        }
+
+        // Load prompts from blamed commits by searching through history
+        for missing_id in missing_ids {
+            // Try to find this prompt in the commit history by running git log
+            // and checking authorship logs
+            if let Ok(prompt) = self.find_prompt_in_history(&missing_id) {
+                self.prompts.insert(missing_id.clone(), prompt);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Find a prompt record in the commit history by searching authorship logs
+    fn find_prompt_in_history(
+        &self,
+        prompt_id: &str,
+    ) -> Result<crate::authorship::authorship_log::PromptRecord, GitAiError> {
+        // Search through the commit history looking for this prompt ID
+        // Start from base_commit and walk backwards
+        let mut args = self.repo.global_args_for_exec();
+        args.push("log".to_string());
+        args.push("--all".to_string());
+        args.push("--format=%H".to_string());
+        args.push("-n".to_string());
+        args.push("100".to_string()); // Limit search to last 100 commits
+        args.push(self.base_commit.clone());
+
+        let output = crate::git::repository::exec_git(&args)?;
+        let stdout = String::from_utf8(output.stdout)?;
+
+        for commit_sha in stdout.lines() {
+            if let Ok(log) =
+                crate::git::refs::get_reference_as_authorship_log_v3(&self.repo, commit_sha)
+            {
+                if let Some(prompt) = log.metadata.prompts.get(prompt_id) {
+                    return Ok(prompt.clone());
+                }
+            }
+        }
+
+        Err(GitAiError::Generic(format!(
+            "Prompt not found in history: {}",
+            prompt_id
+        )))
     }
 
     /// Add a single pathspec to the virtual attributions
@@ -293,6 +364,11 @@ impl VirtualAttributions {
 
     /// Create VirtualAttributions from working log checkpoints for a specific base commit
     /// Returns both the VirtualAttributions and the AuthorshipLog with applied checkpoints
+    ///
+    /// This function:
+    /// 1. Runs blame on the base commit to get ALL prompts from history (like new_for_base_commit)
+    /// 2. Applies working log checkpoints on top
+    /// 3. Returns both the VirtualAttributions and the final AuthorshipLog
     pub async fn from_working_log_for_commit(
         repo: Repository,
         base_commit: String,
@@ -313,17 +389,16 @@ impl VirtualAttributions {
             .unwrap_or_default()
             .as_millis();
 
-        // Step 1: Get base commit's authorship log (or create empty)
-        let mut authorship_log = match get_reference_as_authorship_log_v3(&repo, &base_commit) {
-            Ok(log) => log,
-            Err(_) => {
-                let mut log = AuthorshipLog::new();
-                log.metadata.base_commit_sha = base_commit.clone();
-                log
-            }
-        };
+        // Step 1: First build base VirtualAttributions using blame (gets ALL prompts from history)
+        // This is the same as new_for_base_commit - runs blame to get full history
+        let mut base_va =
+            Self::new_for_base_commit(repo.clone(), base_commit.clone(), pathspecs).await?;
 
-        // Step 2: Get working log for base commit and apply checkpoints
+        // Step 2: Get the authorship log from blame (includes all historical prompts)
+        let mut authorship_log = base_va.to_authorship_log()?;
+        authorship_log.metadata.base_commit_sha = base_commit.clone();
+
+        // Step 3: Apply working log checkpoints on top of blamed history
         let working_log = repo.storage.working_log_for_base_commit(&base_commit);
         if let Ok(checkpoints) = working_log.read_all_checkpoints() {
             let mut session_additions = std::collections::HashMap::new();
@@ -341,14 +416,14 @@ impl VirtualAttributions {
             authorship_log.finalize(&session_additions, &session_deletions);
         }
 
-        // Step 3: Build attributions from working directory files
-        // Prompts are already in the authorship_log we built above
+        // Step 4: Build attributions from working directory files
+        // Prompts include both blamed history AND working log checkpoints
         let mut virtual_attrs = VirtualAttributions {
             repo: repo.clone(),
             base_commit,
             attributions: HashMap::new(),
             file_contents: HashMap::new(),
-            prompts: authorship_log.metadata.prompts.clone(),
+            prompts: authorship_log.metadata.prompts.clone(), // Has ALL prompts now
             ts,
         };
 

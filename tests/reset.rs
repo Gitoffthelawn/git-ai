@@ -202,9 +202,11 @@ fn test_reset_preserves_uncommitted_changes() {
     repo.stage_all_and_commit("Add world").unwrap();
 
     // Reset --soft to base (should preserve both AI commits as staged)
-    repo.git(&["reset", "--soft", &base_commit.commit_sha])
+    let result = repo
+        .git(&["reset", "--soft", &base_commit.commit_sha])
         .expect("reset --soft should succeed");
 
+    println!("result: {}", result);
     // Commit and verify AI authorship preserved
     let new_commit = repo.commit("Re-commit AI changes").unwrap();
 
