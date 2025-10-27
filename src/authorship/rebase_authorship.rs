@@ -1088,7 +1088,64 @@ fn reconstruct_authorship_for_commit(
     Ok(reconstructed_log)
 }
 
-#[allow(dead_code)]
+/// Preserve unstaged AI attribution after amend by creating an INITIAL checkpoint
+///
+/// This computes: Old Working Log - Committed Files = unstaged changes
+/// Files not in the amended commit's tree are preserved with all their AI attributions
+/// and saved as an INITIAL checkpoint for the amended commit
+fn preserve_unstaged_attribution_after_amend(
+    repo: &Repository,
+    original_commit: &str,
+    amended_commit: &str,
+    human_author: &str,
+    _authorship_log: &AuthorshipLog,
+) -> Result<(), GitAiError> {
+    use crate::authorship::virtual_attribution::VirtualAttributions;
+
+    debug_log("Preserving unstaged AI attribution after amend");
+
+    // Use VirtualAttributions to compute unstaged files (Old Working Log - Committed Files)
+    let repo_clone = repo.clone();
+    let unstaged_va = smol::block_on(async {
+        VirtualAttributions::from_working_log_excluding_committed(
+            repo_clone,
+            original_commit,
+            amended_commit,
+        )
+        .await
+    })?;
+
+    // If there are unstaged files with AI attribution, create INITIAL checkpoint
+    if !unstaged_va.files().is_empty() {
+        debug_log(&format!(
+            "Found {} files with unstaged AI attribution",
+            unstaged_va.files().len()
+        ));
+
+        // Convert to INITIAL checkpoint
+        let initial_checkpoint = unstaged_va.to_initial_checkpoint(human_author)?;
+
+        // Save as new working log for amended commit
+        let new_working_log = repo.storage.working_log_for_base_commit(amended_commit);
+        new_working_log.append_checkpoint(&initial_checkpoint)?;
+
+        debug_log(&format!(
+            "Created INITIAL checkpoint with {} entries for amended commit",
+            initial_checkpoint.entries.len()
+        ));
+    } else {
+        debug_log("No unstaged AI attribution to preserve");
+    }
+
+    // Clean up old working log
+    repo.storage
+        .delete_working_log_for_base_commit(original_commit)?;
+
+    debug_log("Finished preserving unstaged AI attribution");
+
+    Ok(())
+}
+
 pub fn rewrite_authorship_after_commit_amend(
     repo: &Repository,
     original_commit: &str,
@@ -1161,9 +1218,14 @@ pub fn rewrite_authorship_after_commit_amend(
 
     crate::git::refs::notes_add(repo, amended_commit, &authorship_json)?;
 
-    // Clean up working log
-    repo.storage
-        .delete_working_log_for_base_commit(original_commit)?;
+    // Preserve unstaged AI attribution: compute Old Working Log - Authorship Log = INITIAL checkpoint
+    preserve_unstaged_attribution_after_amend(
+        repo,
+        original_commit,
+        amended_commit,
+        &_human_author,
+        &authorship_log,
+    )?;
 
     Ok(authorship_log)
 }
@@ -1997,434 +2059,4 @@ fn persist_checkpoint_blobs(
     checkpoint.diff = format!("{:x}", combined_hasher.finalize());
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::git::{find_repository_in_path, test_utils::TmpRepo};
-    use insta::assert_debug_snapshot;
-
-    // Test amending a commit by adding AI-authored lines at the top of the file.
-    ///
-    /// Note: The snapshot's `base_commit_sha` will differ on each run since we create
-    /// new commits. The important parts to verify are:
-    /// - Line ranges are correct (lines 1-2 for AI additions)
-    /// - Metrics are accurate (total_additions, accepted_lines)
-    /// - Prompts and agent info are preserved
-    ///
-    #[test]
-    fn test_amend_add_lines_at_top() {
-        // Create a repo with an initial commit containing human-authored content
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Initial file with human content
-        let initial_content = "line 1\nline 2\nline 3\nline 4\nline 5\n";
-        tmp_repo
-            .write_file("test.txt", initial_content, true)
-            .unwrap();
-        tmp_repo.trigger_checkpoint_with_author("human").unwrap();
-        let initial_log = tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        // Get the original commit SHA
-        let original_commit = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Now make AI changes - add lines at the top
-        let amended_content =
-            "// AI added line 1\n// AI added line 2\nline 1\nline 2\nline 3\nline 4\nline 5\n";
-        tmp_repo
-            .write_file("test.txt", amended_content, true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent", Some("gpt-4"), Some("cursor"))
-            .unwrap();
-
-        // Amend the commit
-        let amended_commit = tmp_repo.amend_commit("Initial commit (amended)").unwrap();
-
-        // Run the rewrite function
-        let mut authorship_log = rewrite_authorship_after_commit_amend(
-            &tmp_repo.gitai_repo(),
-            &original_commit,
-            &amended_commit,
-            "Test User <test@example.com>".to_string(),
-        )
-        .unwrap();
-
-        // Clear commit SHA for stable snapshots
-        authorship_log.metadata.base_commit_sha = "".to_string();
-        assert_debug_snapshot!(authorship_log);
-    }
-
-    #[test]
-    fn test_amend_add_lines_in_middle() {
-        // Create a repo with an initial commit containing human-authored content
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Initial file with human content
-        let initial_content = "line 1\nline 2\nline 3\nline 4\nline 5\n";
-        tmp_repo
-            .write_file("test.txt", initial_content, true)
-            .unwrap();
-        tmp_repo.trigger_checkpoint_with_author("human").unwrap();
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        // Get the original commit SHA
-        let original_commit = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Now make AI changes - add lines in the middle
-        let amended_content = "line 1\nline 2\n// AI inserted line 1\n// AI inserted line 2\nline 3\nline 4\nline 5\n";
-        tmp_repo
-            .write_file("test.txt", amended_content, true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent", Some("gpt-4"), Some("cursor"))
-            .unwrap();
-
-        // Amend the commit
-        let amended_commit = tmp_repo.amend_commit("Initial commit (amended)").unwrap();
-
-        // Run the rewrite function
-        let mut authorship_log = rewrite_authorship_after_commit_amend(
-            &tmp_repo.gitai_repo(),
-            &original_commit,
-            &amended_commit,
-            "Test User <test@example.com>".to_string(),
-        )
-        .unwrap();
-
-        // Clear commit SHA for stable snapshots
-        authorship_log.metadata.base_commit_sha = "".to_string();
-        assert_debug_snapshot!(authorship_log);
-    }
-
-    #[test]
-    fn test_amend_add_lines_at_bottom() {
-        // Create a repo with an initial commit containing human-authored content
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Initial file with human content
-        let initial_content = "line 1\nline 2\nline 3\nline 4\nline 5\n";
-        tmp_repo
-            .write_file("test.txt", initial_content, true)
-            .unwrap();
-        tmp_repo.trigger_checkpoint_with_author("human").unwrap();
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        // Get the original commit SHA
-        let original_commit = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Now make AI changes - add lines at the bottom
-        let amended_content = "line 1\nline 2\nline 3\nline 4\nline 5\n// AI appended line 1\n// AI appended line 2\n";
-        tmp_repo
-            .write_file("test.txt", amended_content, true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent", Some("gpt-4"), Some("cursor"))
-            .unwrap();
-
-        // Amend the commit
-        let amended_commit = tmp_repo.amend_commit("Initial commit (amended)").unwrap();
-
-        // Run the rewrite function
-        let mut authorship_log = rewrite_authorship_after_commit_amend(
-            &tmp_repo.gitai_repo(),
-            &original_commit,
-            &amended_commit,
-            "Test User <test@example.com>".to_string(),
-        )
-        .unwrap();
-
-        // Clear commit SHA for stable snapshots
-        authorship_log.metadata.base_commit_sha = "".to_string();
-        assert_debug_snapshot!(authorship_log);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_amend_multiple_changes() {
-        // Create a repo with an initial commit containing AI-authored content
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Initial file with AI content
-        let initial_content = "function example() {\n  return 42;\n}\n";
-        tmp_repo
-            .write_file("code.js", initial_content, true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent_1", Some("gpt-4"), Some("cursor"))
-            .unwrap();
-        tmp_repo
-            .commit_with_message("Add example function")
-            .unwrap();
-
-        // Get the original commit SHA
-        let original_commit = tmp_repo.get_head_commit_sha().unwrap();
-
-        // First amendment - add at top
-        let content_v2 = "// Header comment\nfunction example() {\n  return 42;\n}\n";
-        tmp_repo.write_file("code.js", content_v2, true).unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent_2", Some("gpt-4"), Some("cursor"))
-            .unwrap();
-
-        // Second amendment - add in middle
-        let content_v3 =
-            "// Header comment\nfunction example() {\n  // Added documentation\n  return 42;\n}\n";
-        tmp_repo.write_file("code.js", content_v3, true).unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent_3", Some("gpt-4"), Some("cursor"))
-            .unwrap();
-
-        // Third amendment - add at bottom
-        let content_v4 = "// Header comment\nfunction example() {\n  // Added documentation\n  return 42;\n}\n\n// Footer\n";
-        tmp_repo.write_file("code.js", content_v4, true).unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent_4", Some("gpt-4"), Some("cursor"))
-            .unwrap();
-
-        // Amend the commit
-        let amended_commit = tmp_repo
-            .amend_commit("Add example function (amended)")
-            .unwrap();
-
-        // Run the rewrite function
-        let mut authorship_log = rewrite_authorship_after_commit_amend(
-            &tmp_repo.gitai_repo(),
-            &original_commit,
-            &amended_commit,
-            "Test User <test@example.com>".to_string(),
-        )
-        .unwrap();
-
-        // Clear commit SHA for stable snapshots
-        authorship_log.metadata.base_commit_sha = "".to_string();
-        assert_debug_snapshot!(authorship_log);
-    }
-
-    /// Test merge --squash with a simple feature branch containing AI and human edits
-    #[test]
-    fn test_prepare_working_log_simple_squash() {
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Create master branch with initial content
-        let initial_content = "line 1\nline 2\nline 3\n";
-        tmp_repo
-            .write_file("main.txt", initial_content, true)
-            .unwrap();
-        tmp_repo.trigger_checkpoint_with_author("human").unwrap();
-        tmp_repo
-            .commit_with_message("Initial commit on master")
-            .unwrap();
-        let master_head = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Create feature branch
-        tmp_repo.create_branch("feature").unwrap();
-
-        // Add AI changes on feature branch
-        let feature_content = "line 1\nline 2\nline 3\n// AI added feature\n";
-        tmp_repo
-            .write_file("main.txt", feature_content, true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent", Some("gpt-4"), Some("cursor"))
-            .unwrap();
-        tmp_repo.commit_with_message("Add AI feature").unwrap();
-
-        // Add human changes on feature branch
-        let feature_content_v2 =
-            "line 1\nline 2\nline 3\n// AI added feature\n// Human refinement\n";
-        tmp_repo
-            .write_file("main.txt", feature_content_v2, true)
-            .unwrap();
-        tmp_repo.trigger_checkpoint_with_author("human").unwrap();
-        tmp_repo.commit_with_message("Human refinement").unwrap();
-        let feature_head = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Go back to master and squash merge
-        tmp_repo.checkout_branch("master").unwrap();
-        tmp_repo.merge_squash("feature").unwrap();
-
-        // Test prepare_working_log_after_squash
-        let checkpoints = prepare_working_log_after_squash(
-            &tmp_repo.gitai_repo(),
-            &feature_head,
-            &master_head,
-            "Test User <test@example.com>",
-        )
-        .unwrap();
-
-        // Should have 1 checkpoint: 1 AI only (no human checkpoint)
-        assert_eq!(checkpoints.len(), 1);
-
-        // Checkpoint should be AI
-        assert_eq!(checkpoints[0].author, "ai");
-        assert!(checkpoints[0].agent_id.is_some());
-        assert!(checkpoints[0].transcript.is_some());
-
-        // Verify checkpoint has entries
-        assert!(!checkpoints[0].entries.is_empty());
-
-        // Verify blob is saved
-        assert!(!checkpoints[0].entries[0].blob_sha.is_empty());
-    }
-
-    /// Test merge --squash with out-of-band changes on master (handles 3-way merge)
-    /// This tests the scenario where commits are made on master AFTER the feature branch diverges
-    #[test]
-    fn test_prepare_working_log_squash_with_main_changes() {
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Create master branch with initial content (common base)
-        let initial_content = "section 1\nsection 2\nsection 3\n";
-        tmp_repo
-            .write_file("document.txt", initial_content, true)
-            .unwrap();
-        tmp_repo.trigger_checkpoint_with_author("human").unwrap();
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-        let _common_base = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Create feature branch and add AI changes
-        tmp_repo.create_branch("feature").unwrap();
-
-        // AI adds content at the END (non-conflicting with master changes)
-        let feature_content = "section 1\nsection 2\nsection 3\n// AI feature addition at end\n";
-        tmp_repo
-            .write_file("document.txt", feature_content, true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent", Some("gpt-4"), Some("cursor"))
-            .unwrap();
-        tmp_repo.commit_with_message("AI adds feature").unwrap();
-        let feature_head = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Switch back to master and make out-of-band changes
-        // These happen AFTER feature branch diverged but BEFORE we decide to merge
-        tmp_repo.checkout_branch("master").unwrap();
-        let master_content = "// Master update at top\nsection 1\nsection 2\nsection 3\n";
-        tmp_repo
-            .write_file("document.txt", master_content, true)
-            .unwrap();
-        tmp_repo.trigger_checkpoint_with_author("human").unwrap();
-        tmp_repo
-            .commit_with_message("Out-of-band update on master")
-            .unwrap();
-        let master_head = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Now squash merge feature into master
-        // The squashed result should have BOTH changes:
-        // - Master's line at top
-        // - Feature's AI line at bottom
-        tmp_repo.merge_squash("feature").unwrap();
-
-        // Test prepare_working_log_after_squash
-        let checkpoints = prepare_working_log_after_squash(
-            &tmp_repo.gitai_repo(),
-            &feature_head,
-            &master_head,
-            "Test User <test@example.com>",
-        )
-        .unwrap();
-
-        // The key thing we're testing is that it doesn't crash with out-of-band changes
-        // and properly handles the 3-way merge scenario
-        println!("Checkpoints generated: {}", checkpoints.len());
-        for (i, checkpoint) in checkpoints.iter().enumerate() {
-            println!(
-                "Checkpoint {}: author={}, has_agent={}, entries={}",
-                i,
-                checkpoint.author,
-                checkpoint.agent_id.is_some(),
-                checkpoint.entries.len()
-            );
-        }
-
-        // Should have at least some checkpoints
-        assert!(
-            !checkpoints.is_empty(),
-            "Should generate at least one checkpoint from squash merge"
-        );
-
-        // Verify at least one checkpoint has content
-        let has_content = checkpoints.iter().any(|c| !c.entries.is_empty());
-        assert!(has_content, "At least one checkpoint should have entries");
-    }
-
-    /// Test merge --squash with multiple AI sessions and human edits
-    #[test]
-    fn test_prepare_working_log_squash_multiple_sessions() {
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Create master branch
-        let initial_content = "header\nbody\nfooter\n";
-        tmp_repo
-            .write_file("file.txt", initial_content, true)
-            .unwrap();
-        tmp_repo.trigger_checkpoint_with_author("human").unwrap();
-        tmp_repo.commit_with_message("Initial").unwrap();
-        let master_head = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Create feature branch
-        tmp_repo.create_branch("feature").unwrap();
-
-        // First AI session
-        let content_v2 = "header\n// AI session 1\nbody\nfooter\n";
-        tmp_repo.write_file("file.txt", content_v2, true).unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_session_1", Some("gpt-4"), Some("cursor"))
-            .unwrap();
-        tmp_repo.commit_with_message("AI session 1").unwrap();
-
-        // Human edit
-        let content_v3 = "header\n// AI session 1\nbody\n// Human addition\nfooter\n";
-        tmp_repo.write_file("file.txt", content_v3, true).unwrap();
-        tmp_repo.trigger_checkpoint_with_author("human").unwrap();
-        tmp_repo.commit_with_message("Human edit").unwrap();
-
-        // Second AI session
-        let content_v4 =
-            "header\n// AI session 1\nbody\n// Human addition\nfooter\n// AI session 2\n";
-        tmp_repo.write_file("file.txt", content_v4, true).unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_session_2", Some("claude"), Some("cursor"))
-            .unwrap();
-        tmp_repo.commit_with_message("AI session 2").unwrap();
-        let feature_head = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Squash merge into master
-        tmp_repo.checkout_branch("master").unwrap();
-        tmp_repo.merge_squash("feature").unwrap();
-
-        // Test prepare_working_log_after_squash
-        let checkpoints = prepare_working_log_after_squash(
-            &tmp_repo.gitai_repo(),
-            &feature_head,
-            &master_head,
-            "Test User <test@example.com>",
-        )
-        .unwrap();
-
-        // Should have 2 checkpoints: 2 AI sessions (no human checkpoint)
-        assert_eq!(checkpoints.len(), 2);
-
-        // All checkpoints should be AI
-        let ai_checkpoints: Vec<_> = checkpoints
-            .iter()
-            .filter(|c| c.agent_id.is_some())
-            .collect();
-        assert_eq!(ai_checkpoints.len(), 2);
-
-        // No human checkpoints
-        let human_checkpoints: Vec<_> = checkpoints
-            .iter()
-            .filter(|c| c.agent_id.is_none())
-            .collect();
-        assert_eq!(human_checkpoints.len(), 0);
-
-        // Verify AI checkpoints have distinct session IDs
-        assert_ne!(
-            ai_checkpoints[0].agent_id.as_ref().unwrap().id,
-            ai_checkpoints[1].agent_id.as_ref().unwrap().id
-        );
-    }
 }

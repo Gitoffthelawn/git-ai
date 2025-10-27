@@ -617,6 +617,223 @@ impl VirtualAttributions {
         // This will require rethinking how checkpoints work
         todo!("Checkpoint conversion not yet implemented")
     }
+
+    /// Create VirtualAttributions from working log, excluding committed lines
+    ///
+    /// This is useful for operations like amend, rebase, etc. where we need to preserve
+    /// unstaged work. The pattern is: Old Working Log - Committed Lines = Unstaged Work
+    ///
+    /// This does line-level filtering: for files that are committed, it only keeps
+    /// attributions for lines that are NOT in the new commit's authorship log.
+    pub async fn from_working_log_excluding_committed(
+        repo: Repository,
+        original_commit: &str,
+        new_commit: &str,
+    ) -> Result<Self, GitAiError> {
+        use crate::authorship::attribution_tracker::line_attributions_to_attributions;
+        use std::collections::{HashMap, HashSet};
+
+        // Step 1: Get files from old working log
+        let old_working_log = repo.storage.working_log_for_base_commit(original_commit);
+        let old_checkpoints = old_working_log.read_all_checkpoints()?;
+
+        if old_checkpoints.is_empty() {
+            // No working log, return empty VirtualAttributions
+            return Ok(VirtualAttributions {
+                repo,
+                base_commit: new_commit.to_string(),
+                attributions: HashMap::new(),
+                file_contents: HashMap::new(),
+                prompts: std::collections::BTreeMap::new(),
+                ts: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            });
+        }
+
+        // Step 2: Get committed line ranges from new commit's authorship log
+        let mut committed_lines: HashMap<String, HashSet<u32>> = HashMap::new();
+        if let Ok(authorship_log) =
+            crate::git::refs::get_reference_as_authorship_log_v3(&repo, new_commit)
+        {
+            eprintln!("DEBUG: Found authorship log for {}", new_commit);
+            for attestation in &authorship_log.attestations {
+                eprintln!(
+                    "DEBUG: File {} has {} entries",
+                    attestation.file_path,
+                    attestation.entries.len()
+                );
+                let file_lines = committed_lines
+                    .entry(attestation.file_path.clone())
+                    .or_default();
+                for entry in &attestation.entries {
+                    for line_range in &entry.line_ranges {
+                        match line_range {
+                            crate::authorship::authorship_log::LineRange::Single(line) => {
+                                file_lines.insert(*line);
+                            }
+                            crate::authorship::authorship_log::LineRange::Range(start, end) => {
+                                for line in *start..=*end {
+                                    file_lines.insert(line);
+                                }
+                            }
+                        }
+                    }
+                }
+                eprintln!(
+                    "DEBUG: File {} committed lines: {:?}",
+                    attestation.file_path, file_lines
+                );
+            }
+        } else {
+            eprintln!("DEBUG: No authorship log for {}", new_commit);
+        }
+
+        // Step 3: Collect files from checkpoints and filter out committed lines
+        let mut checkpoint_files: HashMap<
+            String,
+            Vec<crate::authorship::attribution_tracker::LineAttribution>,
+        > = HashMap::new();
+
+        eprintln!("DEBUG: Processing {} checkpoints", old_checkpoints.len());
+        for checkpoint in &old_checkpoints {
+            eprintln!("DEBUG: Checkpoint has {} entries", checkpoint.entries.len());
+            for entry in &checkpoint.entries {
+                eprintln!(
+                    "DEBUG: File {} has {} line attributions",
+                    entry.file,
+                    entry.line_attributions.len()
+                );
+                let file_committed_lines = committed_lines.get(&entry.file);
+
+                // Filter line attributions: keep only lines NOT in committed set
+                let filtered_attrs: Vec<_> = entry
+                    .line_attributions
+                    .iter()
+                    .filter(|attr| {
+                        let keep = if let Some(committed) = file_committed_lines {
+                            // Keep if ANY line in the range is not committed
+                            let any_uncommitted = (attr.start_line..=attr.end_line)
+                                .any(|line| !committed.contains(&line));
+                            eprintln!(
+                                "DEBUG: Attr lines {}-{}: any_uncommitted={}",
+                                attr.start_line, attr.end_line, any_uncommitted
+                            );
+                            any_uncommitted
+                        } else {
+                            // File not committed at all, keep all attributions
+                            eprintln!(
+                                "DEBUG: Attr lines {}-{}: file not in commit, keeping",
+                                attr.start_line, attr.end_line
+                            );
+                            true
+                        };
+                        keep
+                    })
+                    .cloned()
+                    .collect();
+
+                eprintln!(
+                    "DEBUG: Filtered {} -> {} attributions for {}",
+                    entry.line_attributions.len(),
+                    filtered_attrs.len(),
+                    entry.file
+                );
+                if !filtered_attrs.is_empty() {
+                    checkpoint_files
+                        .entry(entry.file.clone())
+                        .or_default()
+                        .extend(filtered_attrs);
+                }
+            }
+        }
+
+        // Step 4: Build VirtualAttributions from unstaged lines
+        let mut attributions = HashMap::new();
+        let mut file_contents = HashMap::new();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        let workdir = repo.workdir()?;
+        for (file_path, line_attrs) in checkpoint_files {
+            if line_attrs.is_empty() {
+                continue;
+            }
+
+            // Get working directory content
+            let abs_path = workdir.join(&file_path);
+            let working_content = if abs_path.exists() {
+                std::fs::read_to_string(&abs_path).unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            // Regenerate char attributions from line attributions
+            let char_attrs = line_attributions_to_attributions(&line_attrs, &working_content, ts);
+
+            attributions.insert(file_path.clone(), (char_attrs, line_attrs));
+            file_contents.insert(file_path, working_content);
+        }
+
+        Ok(VirtualAttributions {
+            repo,
+            base_commit: new_commit.to_string(),
+            attributions,
+            file_contents,
+            prompts: std::collections::BTreeMap::new(),
+            ts,
+        })
+    }
+
+    /// Convert VirtualAttributions to a single INITIAL checkpoint
+    /// Used when preserving unstaged AI attribution after operations like amend
+    pub fn to_initial_checkpoint(
+        &self,
+        author: &str,
+    ) -> Result<crate::authorship::working_log::Checkpoint, GitAiError> {
+        use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
+        use sha2::{Digest, Sha256};
+
+        let mut entries = Vec::new();
+
+        // Create a working log entry for each file
+        for (file_path, (char_attrs, line_attrs)) in &self.attributions {
+            if char_attrs.is_empty() && line_attrs.is_empty() {
+                continue;
+            }
+
+            // Compute blob SHA for the file content
+            let file_content = self
+                .file_contents
+                .get(file_path)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+
+            let mut hasher = Sha256::new();
+            hasher.update(file_content.as_bytes());
+            let blob_sha = format!("{:x}", hasher.finalize());
+
+            entries.push(WorkingLogEntry::new(
+                file_path.clone(),
+                blob_sha,
+                char_attrs.clone(),
+                line_attrs.clone(),
+            ));
+        }
+
+        // Create INITIAL checkpoint (empty diff since this represents the initial state)
+        let checkpoint = Checkpoint::new(
+            CheckpointKind::Human, // INITIAL checkpoints are marked as Human
+            String::new(),         // Empty diff for INITIAL
+            author.to_string(),
+            entries,
+        );
+
+        Ok(checkpoint)
+    }
 }
 
 /// Merge two VirtualAttributions, favoring the primary for overlaps

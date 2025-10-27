@@ -683,6 +683,38 @@ impl<'a> TestFile<'a> {
         self
     }
 
+    /// Set file contents without staging (but still creates checkpoints for authorship tracking)
+    /// Useful for testing scenarios with precise staging control
+    pub fn set_contents_no_stage<T: Into<ExpectedLine>>(&mut self, lines: Vec<T>) -> &mut Self {
+        let lines: Vec<ExpectedLine> = lines.into_iter().map(|l| l.into()).collect();
+
+        // stub in AI Lines
+        let line_contents = lines
+            .iter()
+            .map(|s| {
+                if s.author_type == AuthorType::Ai {
+                    return "||__AI LINE__ PENDING__||".to_string();
+                } else {
+                    return s.contents.clone();
+                }
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        self.write_and_checkpoint_no_stage(&line_contents, &AuthorType::Human);
+
+        let line_contents_with_ai = lines
+            .iter()
+            .map(|s| s.contents.clone())
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        self.write_and_checkpoint_no_stage(&line_contents_with_ai, &AuthorType::Ai);
+
+        self.lines = lines;
+        self
+    }
+
     pub fn contents(&self) -> String {
         return self
             .lines
@@ -718,6 +750,19 @@ impl<'a> TestFile<'a> {
         //     Ok(output) => println!("✓ checkpoint succeeded: {:?}", output),
         //     Err(error) => println!("✗ checkpoint failed: {:?}", error),
         // }
+
+        result.unwrap();
+    }
+
+    fn write_and_checkpoint_no_stage(&self, contents: &str, author_type: &AuthorType) {
+        fs::write(&self.file_path, contents).unwrap();
+
+        // Create checkpoint without staging - checkpoints work with unstaged files
+        let result = if author_type == &AuthorType::Ai {
+            self.repo.git_ai(&["checkpoint", "mock_ai"])
+        } else {
+            self.repo.git_ai(&["checkpoint"])
+        };
 
         result.unwrap();
     }
