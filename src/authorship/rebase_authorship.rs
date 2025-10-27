@@ -49,24 +49,16 @@ pub fn rewrite_authorship_if_needed(
             repo.storage
                 .delete_working_log_for_base_commit(&merge_squash.base_head)?;
 
-            // Prepare checkpoints from the squashed changes
-            let checkpoints = prepare_working_log_after_squash(
+            // Prepare INITIAL attributions from the squashed changes
+            prepare_working_log_after_squash(
                 repo,
                 &merge_squash.source_head,
                 &merge_squash.base_head,
                 &commit_author,
             )?;
 
-            // Append checkpoints to the working log for the base commit
-            let working_log = repo
-                .storage
-                .working_log_for_base_commit(&merge_squash.base_head);
-            for checkpoint in checkpoints {
-                working_log.append_checkpoint(&checkpoint)?;
-            }
-
             debug_log(&format!(
-                "✓ Prepared authorship checkpoints for merge --squash of {} into {}",
+                "✓ Prepared authorship attributions for merge --squash of {} into {}",
                 merge_squash.source_branch, merge_squash.base_branch
             ));
         }
@@ -206,159 +198,102 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     Ok(new_authorship_log)
 }
 
-/// Prepare working log checkpoints after a merge --squash (before commit)
+/// Prepare working log after a merge --squash (before commit)
 ///
 /// This handles the case where `git merge --squash` has staged changes but hasn't committed yet.
-/// It works similarly to `rewrite_authorship_after_squash_or_rebase`, but:
-/// 1. Compares against the working directory instead of a new commit
-/// 2. Returns checkpoints that can be appended to the current working log
-/// 3. Doesn't save anything - just prepares the checkpoints
+/// Uses VirtualAttributions to merge attributions from both branches and writes everything to INITIAL
+/// since merge squash leaves all changes unstaged.
 ///
 /// # Arguments
 /// * `repo` - Git repository
-/// * `source_head_sha` - SHA of the HEAD commit of the branch that was squashed
-/// * `target_branch_head_sha` - SHA of the current HEAD (target branch)
-/// * `human_author` - The human author identifier to use for human-authored lines
-///
-/// # Returns
-/// Vector of checkpoints ready to be appended to the working log
+/// * `source_head_sha` - SHA of the feature branch that was squashed
+/// * `target_branch_head_sha` - SHA of the current HEAD (target branch where we're merging into)
+/// * `_human_author` - The human author identifier (unused in current implementation)
 pub fn prepare_working_log_after_squash(
     repo: &Repository,
     source_head_sha: &str,
     target_branch_head_sha: &str,
     _human_author: &str,
-) -> Result<Vec<crate::authorship::working_log::Checkpoint>, GitAiError> {
-    // Step 1: Find the common origin base between source and target
-    let origin_base =
-        find_common_origin_base_from_head(repo, source_head_sha, target_branch_head_sha)?;
-
-    // Step 2: Build the old_shas path from source_head_sha to origin_base
-    let _old_shas = build_commit_path_to_base(repo, source_head_sha, &origin_base)?;
-
-    // Step 3: Get the target branch head commit (this is where the squash is being merged into)
-    let target_commit = repo.find_commit(target_branch_head_sha.to_string())?;
-
-    // Step 4: Apply the diff from origin_base to target_commit onto source_head
-    // This creates a hanging commit that represents "what would the source branch look like
-    // if we applied the changes from origin_base to target on top of it"
-
-    // Create hanging commit: merge origin_base -> target changes onto source_head
-    let hanging_commit_sha = apply_diff_as_merge_commit(
-        repo,
-        &origin_base,
-        &target_commit.id().to_string(),
-        source_head_sha, // HEAD of old shas history
-    )?;
-
-    // Step 5: Get the working directory tree (staged changes from squash)
-    // Use `git write-tree` to write the current index to a tree
-    let mut args = repo.global_args_for_exec();
-    args.push("write-tree".to_string());
-    let output = crate::git::repository::exec_git(&args)?;
-    let working_tree_oid = String::from_utf8(output.stdout)?.trim().to_string();
-    let working_tree = repo.find_tree(working_tree_oid.clone())?;
-
-    // Step 6: Create a temporary commit for the working directory state
-    // Use origin_base as parent so the diff shows ALL changes from the feature branch
-    let origin_base_commit = repo.find_commit(origin_base.clone())?;
-    let temp_commit = repo.commit(
-        None, // Don't update any refs
-        &target_commit.author()?,
-        &target_commit.committer()?,
-        "Temporary commit for squash authorship reconstruction",
-        &working_tree,
-        &[&origin_base_commit], // Parent is the common base, not target!
-    )?;
-
-    // Step 7: Reconstruct authorship from the diff between temp_commit and origin_base
-    // This shows ALL changes that came from the feature branch
-    let temp_commit_obj = repo.find_commit(temp_commit.to_string())?;
-    let mut foreign_prompts_cache: HashMap<
-        String,
-        Option<crate::authorship::authorship_log::PromptRecord>,
-    > = HashMap::new();
-    let new_authorship_log = reconstruct_authorship_from_diff(
-        repo,
-        &temp_commit_obj,
-        &origin_base_commit,
-        &hanging_commit_sha,
-        &mut AuthorshipLogCache::new(),
-        &mut foreign_prompts_cache,
-    )?;
-
-    // Step 8: Clean up temporary commits
-    delete_hanging_commit(repo, &hanging_commit_sha)?;
-    delete_hanging_commit(repo, &temp_commit.to_string())?;
-
-    // Step 9: Build file contents map from staged files
+) -> Result<(), GitAiError> {
+    use crate::authorship::virtual_attribution::{
+        VirtualAttributions, merge_attributions_favoring_first,
+    };
     use std::collections::HashMap;
-    let mut file_contents: HashMap<String, String> = HashMap::new();
-    for file_attestation in &new_authorship_log.attestations {
-        let file_path = &file_attestation.file_path;
-        // Read the staged version of the file using git show :path
+
+    // Step 1: Get list of changed files between the two branches
+    let mut args = repo.global_args_for_exec();
+    args.push("diff".to_string());
+    args.push("--name-only".to_string());
+    args.push(source_head_sha.to_string());
+    args.push(target_branch_head_sha.to_string());
+
+    let output = crate::git::repository::exec_git(&args)?;
+    let changed_files: Vec<String> = String::from_utf8(output.stdout)?
+        .lines()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+
+    if changed_files.is_empty() {
+        // No files changed, nothing to do
+        return Ok(());
+    }
+
+    // Step 2: Create VirtualAttributions for both branches
+    let repo_clone = repo.clone();
+    let source_va = smol::block_on(async {
+        VirtualAttributions::new_for_base_commit(
+            repo_clone,
+            source_head_sha.to_string(),
+            &changed_files,
+        )
+        .await
+    })?;
+
+    let repo_clone = repo.clone();
+    let target_va = smol::block_on(async {
+        VirtualAttributions::new_for_base_commit(
+            repo_clone,
+            target_branch_head_sha.to_string(),
+            &changed_files,
+        )
+        .await
+    })?;
+
+    // Step 3: Read staged files content (final state after squash)
+    let mut staged_files: HashMap<String, String> = HashMap::new();
+    for file_path in &changed_files {
         let mut args = repo.global_args_for_exec();
         args.push("show".to_string());
         args.push(format!(":{}", file_path));
 
-        let output = crate::git::repository::exec_git(&args)?;
-        let file_content = String::from_utf8(output.stdout).map_err(|_| {
-            GitAiError::Generic(format!("Failed to read staged file: {}", file_path))
-        })?;
-        file_contents.insert(file_path.clone(), file_content);
+        let output = crate::git::repository::exec_git(&args);
+        if let Ok(output) = output {
+            if let Ok(file_content) = String::from_utf8(output.stdout) {
+                staged_files.insert(file_path.clone(), file_content);
+            }
+        }
     }
 
-    // Step 10: Convert authorship log to checkpoints
-    let mut checkpoints = new_authorship_log
-        .convert_to_checkpoints_for_squash(&file_contents)
-        .map_err(|e| {
-            GitAiError::Generic(format!(
-                "Failed to convert authorship log to checkpoints: {}",
-                e
-            ))
-        })?;
+    // Step 4: Merge VirtualAttributions, favoring target branch (HEAD)
+    let merged_va = merge_attributions_favoring_first(target_va, source_va, staged_files)?;
 
-    // Filter to keep only AI checkpoints - we don't track human-only changes in working logs
-    checkpoints.retain(|checkpoint| checkpoint.kind != CheckpointKind::Human);
+    // Step 5: Convert to INITIAL (everything is uncommitted in a squash)
+    // Pass empty committed_files since nothing has been committed yet
+    let empty_committed_files: HashMap<String, String> = HashMap::new();
+    let (_authorship_log, initial_attributions) =
+        merged_va.to_authorship_log_and_initial_working_log(empty_committed_files)?;
 
-    // Step 11: For each checkpoint, read the staged file content and save blobs
-    let working_log = repo
-        .storage
-        .working_log_for_base_commit(target_branch_head_sha);
-
-    for checkpoint in &mut checkpoints {
-        use sha2::{Digest, Sha256};
-        let mut file_hashes = Vec::new();
-
-        for entry in &mut checkpoint.entries {
-            // Read the staged version of the file using git show :path
-            let mut args = repo.global_args_for_exec();
-            args.push("show".to_string());
-            args.push(format!(":{}", entry.file));
-
-            let output = crate::git::repository::exec_git(&args)?;
-            let file_content = String::from_utf8(output.stdout).map_err(|_| {
-                GitAiError::Generic(format!("Failed to read staged file: {}", entry.file))
-            })?;
-
-            // Persist the blob and get its SHA
-            let blob_sha = working_log.persist_file_version(&file_content)?;
-            entry.blob_sha = blob_sha.clone();
-
-            // Collect file path and hash for combined hash calculation
-            file_hashes.push((entry.file.clone(), blob_sha));
-        }
-
-        // Compute combined hash for the checkpoint (same as normal checkpoint logic)
-        file_hashes.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut combined_hasher = Sha256::new();
-        for (file_path, hash) in &file_hashes {
-            combined_hasher.update(file_path.as_bytes());
-            combined_hasher.update(hash.as_bytes());
-        }
-        checkpoint.diff = format!("{:x}", combined_hasher.finalize());
+    // Step 6: Write INITIAL file
+    if !initial_attributions.files.is_empty() {
+        let working_log = repo
+            .storage
+            .working_log_for_base_commit(target_branch_head_sha);
+        working_log
+            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
     }
 
-    Ok(checkpoints)
+    Ok(())
 }
 
 /// Get all file paths modified across a list of commits
