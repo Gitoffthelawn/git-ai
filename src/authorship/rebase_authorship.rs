@@ -168,17 +168,6 @@ pub fn prepare_working_log_after_squash(
     Ok(())
 }
 
-/// Rewrite authorship logs after a rebase operation using VirtualAttributions
-///
-/// This is the new implementation that replaces the hanging commit / blame_in_context approach.
-/// It processes commits sequentially, transforming attributions through each commit in the rebase.
-///
-/// # Arguments
-/// * `repo` - Git repository
-/// * `original_head` - SHA of the HEAD before rebase
-/// * `original_commits` - Vector of original commit SHAs (before rebase), oldest first
-/// * `new_commits` - Vector of new commit SHAs (after rebase), oldest first
-/// * `_human_author` - The human author identifier (unused in this implementation)
 pub fn rewrite_authorship_after_rebase_v2(
     repo: &Repository,
     original_head: &str,

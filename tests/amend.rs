@@ -33,10 +33,10 @@ fn test_amend_add_lines_at_top() {
         "initial attributions: {:?}",
         repo.current_working_logs().read_initial_attributions()
     );
-    
+
     // Now stage and commit the AI lines
     repo.stage_all_and_commit("Add AI lines").unwrap();
-    
+
     // Verify AI authorship is preserved after the second commit
     file.assert_lines_and_blame(lines![
         "// AI added line 1".ai(),
