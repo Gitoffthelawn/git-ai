@@ -13,18 +13,31 @@ fn test_amend_add_lines_at_top() {
     file.set_contents(lines!["line 1", "line 2", "line 3", "line 4", "line 5"]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
+    println!(
+        "initial attributions: {:?}",
+        repo.current_working_logs().read_initial_attributions()
+    );
+
     // AI adds lines at the top
     file.insert_at(
         0,
         lines!["// AI added line 1".ai(), "// AI added line 2".ai()],
     );
 
-    // Amend the commit
-    repo.git(&["add", "-A"]).unwrap();
+    // Amend the commit WITHOUT staging the AI lines
+    // repo.git(&["add", "-A"]).unwrap();
     repo.git(&["commit", "--amend", "-m", "Initial commit (amended)"])
         .unwrap();
 
-    // Verify AI authorship is preserved
+    println!(
+        "initial attributions: {:?}",
+        repo.current_working_logs().read_initial_attributions()
+    );
+    
+    // Now stage and commit the AI lines
+    repo.stage_all_and_commit("Add AI lines").unwrap();
+    
+    // Verify AI authorship is preserved after the second commit
     file.assert_lines_and_blame(lines![
         "// AI added line 1".ai(),
         "// AI added line 2".ai(),

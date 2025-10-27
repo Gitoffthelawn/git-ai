@@ -568,19 +568,10 @@ async fn get_initial_checkpoint_entries(
                             continue;
                         }
 
-                        // Skip human-authored lines - for AI checkpoints, attribute them to the current session instead
+                        // Skip human-authored lines - they should remain human
                         if author == CheckpointKind::Human.to_str() {
-                            if kind != CheckpointKind::Human {
-                                // For AI checkpoints, attribute uncovered lines to the current AI session
-                                prev_line_attributions.push(
-                                    crate::authorship::attribution_tracker::LineAttribution {
-                                        start_line: line,
-                                        end_line: line,
-                                        author_id: author_id.clone(),
-                                        overridden: false,
-                                    },
-                                );
-                            }
+                            // Human lines stay human, don't add them to prev_line_attributions
+                            // They'll be filled in by attribute_unattributed_ranges later if needed
                             continue;
                         }
 

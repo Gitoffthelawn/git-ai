@@ -1088,62 +1088,35 @@ fn reconstruct_authorship_for_commit(
     Ok(reconstructed_log)
 }
 
-/// Preserve unstaged AI attribution after amend by creating an INITIAL checkpoint
-///
-/// This computes: Old Working Log - Committed Files = unstaged changes
-/// Files not in the amended commit's tree are preserved with all their AI attributions
-/// and saved as an INITIAL checkpoint for the amended commit
-fn preserve_unstaged_attribution_after_amend(
+/// Get file contents from a commit tree for specified pathspecs
+fn get_committed_files_content(
     repo: &Repository,
-    original_commit: &str,
-    amended_commit: &str,
-    human_author: &str,
-    _authorship_log: &AuthorshipLog,
-) -> Result<(), GitAiError> {
-    use crate::authorship::virtual_attribution::VirtualAttributions;
+    commit_sha: &str,
+    pathspecs: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    use std::collections::HashMap;
 
-    debug_log("Preserving unstaged AI attribution after amend");
+    let commit = repo.find_commit(commit_sha.to_string())?;
+    let tree = commit.tree()?;
 
-    // Use VirtualAttributions to compute unstaged files (Old Working Log - Committed Files)
-    let repo_clone = repo.clone();
-    let unstaged_va = smol::block_on(async {
-        VirtualAttributions::from_working_log_excluding_committed(
-            repo_clone,
-            original_commit,
-            amended_commit,
-        )
-        .await
-    })?;
+    let mut files = HashMap::new();
 
-    // If there are unstaged files with AI attribution, create INITIAL checkpoint
-    if !unstaged_va.files().is_empty() {
-        debug_log(&format!(
-            "Found {} files with unstaged AI attribution",
-            unstaged_va.files().len()
-        ));
-
-        // Convert to INITIAL checkpoint
-        let initial_checkpoint = unstaged_va.to_initial_checkpoint(human_author)?;
-
-        // Save as new working log for amended commit
-        let new_working_log = repo.storage.working_log_for_base_commit(amended_commit);
-        new_working_log.append_checkpoint(&initial_checkpoint)?;
-
-        debug_log(&format!(
-            "Created INITIAL checkpoint with {} entries for amended commit",
-            initial_checkpoint.entries.len()
-        ));
-    } else {
-        debug_log("No unstaged AI attribution to preserve");
+    for file_path in pathspecs {
+        match tree.get_path(std::path::Path::new(file_path)) {
+            Ok(entry) => {
+                if let Ok(blob) = repo.find_blob(entry.id()) {
+                    let blob_content = blob.content().unwrap_or_default();
+                    let content = String::from_utf8_lossy(&blob_content).to_string();
+                    files.insert(file_path.clone(), content);
+                }
+            }
+            Err(_) => {
+                // File doesn't exist in this commit (could be deleted), skip it
+            }
+        }
     }
 
-    // Clean up old working log
-    repo.storage
-        .delete_working_log_for_base_commit(original_commit)?;
-
-    debug_log("Finished preserving unstaged AI attribution");
-
-    Ok(())
+    Ok(files)
 }
 
 pub fn rewrite_authorship_after_commit_amend(
@@ -1192,9 +1165,9 @@ pub fn rewrite_authorship_after_commit_amend(
         false
     };
 
-    // Create VirtualAttributions from working log checkpoints and get authorship log
+    // Phase 1: Load all attributions (committed + uncommitted)
     let repo_clone = repo.clone();
-    let (_working_va, mut authorship_log) = smol::block_on(async {
+    let working_va = smol::block_on(async {
         VirtualAttributions::from_working_log_for_commit(
             repo_clone,
             original_commit.to_string(),
@@ -1208,24 +1181,32 @@ pub fn rewrite_authorship_after_commit_amend(
         .await
     })?;
 
-    // Update base commit SHA to the amended commit
+    // Phase 2: Read committed content from amended commit
+    let committed_files = get_committed_files_content(repo, amended_commit, &pathspecs)?;
+
+    // Phase 3: Split into committed (authorship log) vs uncommitted (INITIAL)
+    let (mut authorship_log, initial_attributions) =
+        working_va.to_authorship_log_and_initial_working_log(committed_files)?;
+
+    // Update base commit SHA
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
 
-    // Save the authorship log
+    // Save authorship log
     let authorship_json = authorship_log
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
-
     crate::git::refs::notes_add(repo, amended_commit, &authorship_json)?;
 
-    // Preserve unstaged AI attribution: compute Old Working Log - Authorship Log = INITIAL checkpoint
-    preserve_unstaged_attribution_after_amend(
-        repo,
-        original_commit,
-        amended_commit,
-        &_human_author,
-        &authorship_log,
-    )?;
+    // Save INITIAL file for uncommitted attributions
+    if !initial_attributions.files.is_empty() {
+        let new_working_log = repo.storage.working_log_for_base_commit(amended_commit);
+        new_working_log
+            .write_initial_attributions(initial_attributions.files, initial_attributions.prompts)?;
+    }
+
+    // Clean up old working log
+    repo.storage
+        .delete_working_log_for_base_commit(original_commit)?;
 
     Ok(authorship_log)
 }
@@ -1907,14 +1888,13 @@ pub fn reconstruct_working_log_after_reset(
     let pathspecs_clone = pathspecs.clone();
 
     let old_head_va = smol::block_on(async {
-        let (va, _) = crate::authorship::virtual_attribution::VirtualAttributions::from_working_log_for_commit(
+        crate::authorship::virtual_attribution::VirtualAttributions::from_working_log_for_commit(
             repo_clone,
             old_head_clone,
             &pathspecs_clone,
             None, // Don't need human_author for this step
         )
-        .await?;
-        Ok::<_, GitAiError>(va)
+        .await
     })?;
 
     debug_log(&format!(

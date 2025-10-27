@@ -4,8 +4,24 @@ use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::AgentId;
+use insta::assert_debug_snapshot;
+use regex::Regex;
 use repos::test_repo::TestRepo;
 use std::collections::HashMap;
+
+/// Normalize blame output for snapshot testing by replacing non-deterministic
+/// elements (commit SHAs and timestamps) with placeholders
+fn normalize_blame_output(blame_output: &str) -> String {
+    // Replace commit SHAs (40 hex chars) with placeholder
+    let re_sha = Regex::new(r"[0-9a-f]{40}|[0-9a-f]{7,}").unwrap();
+    let result = re_sha.replace_all(blame_output, "COMMIT_SHA");
+
+    // Replace timestamps (e.g., "2025-10-27 11:29:32 -0400") with placeholder
+    let re_timestamp = Regex::new(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [\+\-]\d{4}").unwrap();
+    let result = re_timestamp.replace_all(&result, "TIMESTAMP");
+
+    result.to_string()
+}
 
 #[test]
 fn test_initial_only_no_blame_data() {
@@ -63,31 +79,6 @@ fn test_initial_only_no_blame_data() {
     repo.git_ai(&["checkpoint"])
         .expect("checkpoint should succeed");
 
-    // Check what checkpoints exist
-    let working_log_after = repo.current_working_logs();
-    let checkpoints = working_log_after
-        .read_all_checkpoints()
-        .expect("read checkpoints");
-    eprintln!(
-        "Number of checkpoints after checkpoint: {}",
-        checkpoints.len()
-    );
-    for (i, cp) in checkpoints.iter().enumerate() {
-        eprintln!(
-            "Checkpoint {}: {} entries, author: {}",
-            i,
-            cp.entries.len(),
-            cp.author
-        );
-        for entry in &cp.entries {
-            eprintln!(
-                "  - File: {}, {} line_attributions",
-                entry.file,
-                entry.line_attributions.len()
-            );
-        }
-    }
-
     // Commit and verify
     let commit = repo
         .stage_all_and_commit("add newfile")
@@ -116,14 +107,8 @@ fn test_initial_only_no_blame_data() {
         .git_ai(&["blame", "newfile.txt"])
         .expect("blame should succeed");
 
-    eprintln!("Blame output:\n{}", blame_output);
-
-    // The INITIAL attributions should be preserved (blame shows the tool name, not the hash)
-    assert!(
-        blame_output.contains("test-tool"),
-        "INITIAL author (test-tool) should appear in blame. Got: {}",
-        blame_output
-    );
+    let normalized = normalize_blame_output(&blame_output);
+    assert_debug_snapshot!(normalized);
 }
 
 #[test]
@@ -190,12 +175,8 @@ fn test_initial_wins_overlaps() {
         .git_ai(&["blame", "example.txt"])
         .expect("blame should succeed");
 
-    // Lines 1-2 should show the INITIAL author (override-tool)
-    assert!(
-        blame_output.contains("override-tool"),
-        "INITIAL override author (override-tool) should appear in blame. Got: {}",
-        blame_output
-    );
+    let normalized = normalize_blame_output(&blame_output);
+    assert_debug_snapshot!(normalized);
 }
 
 #[test]
@@ -286,25 +267,8 @@ fn test_initial_and_blame_merge() {
         .git_ai(&["blame", "example.txt"])
         .expect("blame should succeed");
 
-    // Lines 1-3 should show tool1 (from INITIAL)
-    assert!(
-        blame_output.contains("tool1"),
-        "tool1 should appear in blame. Got: {}",
-        blame_output
-    );
-
-    // Line 5 should show tool2 (from INITIAL)
-    assert!(
-        blame_output.contains("tool2"),
-        "tool2 should appear in blame"
-    );
-
-    // Lines 4, 6, 7 should show mock_ai (from blame since not in INITIAL)
-    assert!(
-        blame_output.contains("mock_ai"),
-        "mock_ai should appear for lines not in INITIAL. Got: {}",
-        blame_output
-    );
+    let normalized = normalize_blame_output(&blame_output);
+    assert_debug_snapshot!(normalized);
 }
 
 #[test]
@@ -373,23 +337,14 @@ fn test_partial_file_coverage() {
     let blame_a = repo
         .git_ai(&["blame", "fileA.txt"])
         .expect("blame should succeed");
-    assert!(
-        blame_a.contains("toolA"),
-        "fileA should show INITIAL attributions (toolA). Got: {}",
-        blame_a
-    );
+
+    let normalized_a = normalize_blame_output(&blame_a);
+    assert_debug_snapshot!(normalized_a);
 
     // Check blame for fileB - should show mock (no INITIAL, so blame is used)
     let blame_b = repo
         .git_ai(&["blame", "fileB.txt"])
         .expect("blame should succeed");
-    assert!(
-        blame_b.contains("mock_ai"),
-        "fileB should show blame attributions (mock_ai) since no INITIAL. Got: {}",
-        blame_b
-    );
-    assert!(
-        !blame_b.contains("toolA"),
-        "fileB should not show fileA's INITIAL attributions"
-    );
+    let normalized_b = normalize_blame_output(&blame_b);
+    assert_debug_snapshot!(normalized_b);
 }
