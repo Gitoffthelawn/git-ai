@@ -492,7 +492,6 @@ impl VirtualAttributions {
         Ok(authorship_log)
     }
 
-
     /// Split VirtualAttributions into committed and uncommitted buckets
     ///
     /// This method compares the working directory content (in self) with the committed content
@@ -727,9 +726,7 @@ impl VirtualAttributions {
 
         Ok((authorship_log, initial_attributions))
     }
-
-
-
+}
 /// Merge two VirtualAttributions, favoring the primary for overlaps
 pub fn merge_attributions_favoring_first(
     primary: VirtualAttributions,
@@ -961,6 +958,27 @@ fn compute_attributions_for_file(
             // File doesn't exist at this commit or can't be blamed, skip it
             Ok(None)
         }
+    }
+}
+
+fn get_file_content_at_commit(
+    repo: &Repository,
+    commit_sha: &str,
+    file_path: &str,
+) -> Result<String, GitAiError> {
+    let commit = repo.find_commit(commit_sha.to_string())?;
+    let tree = commit.tree()?;
+
+    match tree.get_path(std::path::Path::new(file_path)) {
+        Ok(entry) => {
+            if let Ok(blob) = repo.find_blob(entry.id()) {
+                let blob_content = blob.content().unwrap_or_default();
+                Ok(String::from_utf8_lossy(&blob_content).to_string())
+            } else {
+                Ok(String::new())
+            }
+        }
+        Err(_) => Ok(String::new()),
     }
 }
 
