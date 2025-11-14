@@ -3,6 +3,7 @@ use crate::authorship::transcript::AiTranscript;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
 
 pub const CHECKPOINT_API_VERSION: &str = "checkpoint/1.0.0";
 
@@ -107,6 +108,8 @@ pub struct Checkpoint {
     pub transcript: Option<AiTranscript>,
     pub agent_id: Option<AgentId>,
     #[serde(default)]
+    pub agent_metadata: Option<HashMap<String, String>>,
+    #[serde(default)]
     pub line_stats: CheckpointLineStats,
     #[serde(default)]
     pub api_version: String,
@@ -132,6 +135,7 @@ impl Checkpoint {
             timestamp,
             transcript: None,
             agent_id: None,
+            agent_metadata: None,
             line_stats: CheckpointLineStats::default(),
             api_version: CHECKPOINT_API_VERSION.to_string(),
         }

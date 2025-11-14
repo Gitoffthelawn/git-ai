@@ -19,6 +19,7 @@ pub struct AgentCheckpointFlags {
 #[derive(Clone, Debug)]
 pub struct AgentRunResult {
     pub agent_id: AgentId,
+    pub agent_metadata: Option<HashMap<String, String>>,
     pub checkpoint_kind: CheckpointKind,
     pub transcript: Option<AiTranscript>,
     pub repo_working_dir: Option<String>,
@@ -98,6 +99,7 @@ impl AgentCheckpointPreset for ClaudePreset {
             // Early return for human checkpoint
             return Ok(AgentRunResult {
                 agent_id,
+                agent_metadata: None,
                 checkpoint_kind: CheckpointKind::Human,
                 transcript: None,
                 repo_working_dir: None,
@@ -109,6 +111,7 @@ impl AgentCheckpointPreset for ClaudePreset {
 
         Ok(AgentRunResult {
             agent_id,
+            agent_metadata: None,
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             // use default.
@@ -180,6 +183,7 @@ impl AgentCheckpointPreset for CursorPreset {
                     id: conversation_id.clone(),
                     model: "unknown".to_string(),
                 },
+                agent_metadata: None,
                 checkpoint_kind: CheckpointKind::Human,
                 transcript: None,
                 repo_working_dir: Some(repo_working_dir),
@@ -248,6 +252,7 @@ impl AgentCheckpointPreset for CursorPreset {
 
         Ok(AgentRunResult {
             agent_id,
+            agent_metadata: None,
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             repo_working_dir: Some(repo_working_dir),
@@ -525,6 +530,10 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
             .ok_or_else(|| {
                 GitAiError::PresetError("chatSessionPath not found in hook_input".to_string())
             })?;
+        
+        let agent_metadata = HashMap::from([
+            ("chat_session_path".to_string(), chat_session_path.to_string()),
+        ]);
 
         // Accept either chatSessionId (old) or sessionId (from VS Code extension)
         let chat_session_id = hook_data
@@ -548,9 +557,6 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
                     .collect::<HashMap<String, String>>()
             });
 
-        // Read the Copilot chat session JSON
-        let session_content =
-            std::fs::read_to_string(chat_session_path).map_err(|e| GitAiError::IoError(e))?;
         // Required working directory provided by the extension
         let repo_working_dir: String = hook_data
             .get("workspaceFolder")
@@ -562,9 +568,29 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
             })?
             .to_string();
 
-        // Build transcript and model via helper
-        let (transcript, detected_model, edited_filepaths) =
-            GithubCopilotPreset::transcript_and_model_from_copilot_session_json(&session_content)?;
+        // Read the Copilot chat session JSON (ignore errors)
+        let (transcript, detected_model, edited_filepaths) = if let Ok(session_content) =
+            std::fs::read_to_string(chat_session_path)
+        {
+            // Build transcript and model via helper
+            GithubCopilotPreset::transcript_and_model_from_copilot_session_json(&session_content)
+                .map(|(t, m, f)| (Some(t), m, f))
+                .unwrap_or_else(|e| {
+                    // TODO Log error to sentry (JSON exists but invalid)
+                    eprintln!(
+                        "[Warning] Failed to parse GitHub Copilot chat session JSON from {} (will update transcript at commit): {}",
+                        chat_session_path,
+                        e
+                    );
+                    (None, None, None)
+                })
+        } else {
+            eprintln!(
+                "[Warning] Failed to read GitHub Copilot chat session JSON from {} (will update transcript at commit)",
+                chat_session_path
+            );
+            (None, None, None)
+        };
 
         let agent_id = AgentId {
             tool: "github-copilot".to_string(),
@@ -574,8 +600,9 @@ impl AgentCheckpointPreset for GithubCopilotPreset {
 
         Ok(AgentRunResult {
             agent_id,
+            agent_metadata: Some(agent_metadata),
             checkpoint_kind: CheckpointKind::AiAgent,
-            transcript: Some(transcript),
+            transcript,
             repo_working_dir: Some(repo_working_dir),
             edited_filepaths,
             will_edit_filepaths: None,
@@ -875,6 +902,7 @@ impl AgentCheckpointPreset for AiTabPreset {
         if hook_event_name == "before_edit" {
             return Ok(AgentRunResult {
                 agent_id,
+                agent_metadata: None,
                 checkpoint_kind: CheckpointKind::Human,
                 transcript: None,
                 repo_working_dir,
@@ -886,6 +914,7 @@ impl AgentCheckpointPreset for AiTabPreset {
 
         Ok(AgentRunResult {
             agent_id,
+            agent_metadata: None,
             checkpoint_kind: CheckpointKind::AiTab,
             transcript: None,
             repo_working_dir,

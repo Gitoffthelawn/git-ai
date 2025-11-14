@@ -243,6 +243,7 @@ pub fn run(
         {
             checkpoint.transcript = Some(agent_run.transcript.clone().unwrap_or_default());
             checkpoint.agent_id = Some(agent_run.agent_id.clone());
+            checkpoint.agent_metadata = agent_run.agent_metadata.clone();
         }
 
         // Append checkpoint to the working log
@@ -1039,6 +1040,7 @@ mod tests {
                 id: "test_session".to_string(),
                 model: "test_model".to_string(),
             },
+            agent_metadata: None,
             transcript: Some(AiTranscript { messages: vec![] }),
             checkpoint_kind: CheckpointKind::AiAgent,
             repo_working_dir: None,

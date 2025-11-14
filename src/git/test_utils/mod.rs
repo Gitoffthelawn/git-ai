@@ -393,6 +393,7 @@ impl TmpRepo {
         // Create agent run result
         let agent_run_result = AgentRunResult {
             agent_id,
+            agent_metadata: None,
             transcript: Some(transcript),
             checkpoint_kind: CheckpointKind::AiAgent,
             repo_working_dir: None,
