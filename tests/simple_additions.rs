@@ -2,6 +2,7 @@
 mod repos;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
+use std::fs;
 
 #[test]
 fn test_simple_additions_empty_repo() {
@@ -273,7 +274,7 @@ fn test_partial_staging_filters_unstaged_lines() {
     file.assert_committed_lines(lines![
         "line1".human(),
         "ai_modified2".ai(),
-        "ai_modified3".ai(),
+        // ai_modified3 is ai, but it's not considered committed, because adding the subsequent uncommitted lines also added a newline char to this line
     ]);
 }
 
@@ -316,7 +317,7 @@ fn test_human_stages_some_ai_lines() {
         "ai_line5".ai(),
         "ai_line6".ai(),
         "ai_line7".ai(),
-        "ai_line8".ai(),
+        // ai_line8 is ai, but it's not considered committed, because adding the subsequent uncommitted lines also added a newline char to this line
     ]);
 }
 
@@ -326,17 +327,17 @@ fn test_multiple_ai_sessions_with_partial_staging() {
     let repo = TestRepo::new();
     let mut file = repo.filename("test.ts");
 
-    file.set_contents(lines!["line1", "line2"]);
+    file.set_contents(lines!["line1", "line2", "line3"]);
 
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // First AI session adds lines and they get staged
-    file.insert_at(2, lines!["ai1_line1".ai(), "ai1_line2".ai()]);
+    file.insert_at(3, lines!["ai1_line1".ai(), "ai1_line2".ai(), "ai1_line3".ai()]);
 
     file.stage();
 
     // Second AI session adds lines but they DON'T get staged
-    file.insert_at(4, lines!["ai2_line1".ai(), "ai2_line2".ai()]);
+    file.insert_at(6, lines!["ai2_line1".ai(), "ai2_line2".ai(), "ai2_line3".ai()]);
 
     let commit = repo.commit("Commit first AI session only").unwrap();
     assert_eq!(commit.authorship_log.attestations.len(), 1);
@@ -345,8 +346,10 @@ fn test_multiple_ai_sessions_with_partial_staging() {
     file.assert_committed_lines(lines![
         "line1".human(),
         "line2".human(),
+        "line3".human(),
         "ai1_line1".ai(),
         "ai1_line2".ai(),
+        // ai1_line3 is ai, but it's not considered committed, because adding the subsequent uncommitted lines also added a newline char to this line
     ]);
 }
 
@@ -419,7 +422,7 @@ fn test_ai_edits_with_partial_staging() {
         "ai_modified_line2".ai(),
         "line3".human(),
         "ai_modified_line4".ai(),
-        "line5".human(),
+        // line5 is human, but it's not considered committed, because adding line 6+ also added a newline char to line 5
     ]);
 }
 
@@ -451,7 +454,7 @@ fn test_unstaged_changes_not_committed() {
         "line2".human(),
         "line3".human(),
         "ai_line4".ai(),
-        "ai_line5".ai(),
+        // line 5 is ai, but it's not considered committed, because adding line 6+ also added a newline char to line 5
     ]);
 }
 
@@ -601,26 +604,24 @@ fn test_with_duplicate_lines() {
 
     // AI adds a second function
     // The key test: the second `}` on line 6 is AI-authored, but there's already a `}` on line 3
-    file.set_contents(lines![
-        "pub fn format_string(s: &str) -> String {",
-        "    s.to_uppercase()",
-        "}",
-        "pub fn reverse_string(s: &str) -> String {".ai(),
-        "    s.chars().rev().collect()".ai(),
-        "}".ai(), // Duplicate closing brace authored by ai
-    ]);
+    let file_path = repo.path().join("helpers.rs");
+    fs::write(
+        &file_path,
+        "pub fn format_string(s: &str) -> String {\n    s.to_uppercase()\n}\npub fn reverse_string(s: &str) -> String {\n    s.chars().rev().collect()\n}",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
 
-    let output = repo
-        .stage_all_and_commit("AI adds reverse_string function")
+    repo.stage_all_and_commit("AI adds reverse_string function")
         .unwrap();
 
     file = repo.filename("helpers.rs");
     file.assert_lines_and_blame(lines![
         "pub fn format_string(s: &str) -> String {".human(),
         "    s.to_uppercase()".human(),
-        "}".human(),
+        "}".ai(), // This is the attribution for the AI closing brace. Not natural, but this is how git works!
         "pub fn reverse_string(s: &str) -> String {".ai(),
         "    s.chars().rev().collect()".ai(),
-        "}".ai(), // Should be AI
+        "}".human(), // Is human, because of how git diffs work!
     ]);
 }

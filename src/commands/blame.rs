@@ -118,6 +118,9 @@ pub struct GitAiBlameOptions {
 
     // No output
     pub no_output: bool,
+
+    // Ignore whitespace
+    pub ignore_whitespace: bool,
 }
 
 impl Default for GitAiBlameOptions {
@@ -156,6 +159,7 @@ impl Default for GitAiBlameOptions {
             use_prompt_hashes_as_names: false,
             return_human_authors_as_human: false,
             no_output: false,
+            ignore_whitespace: false,
         }
     }
 }
@@ -352,8 +356,10 @@ impl Repository {
         args.push("blame".to_string());
         args.push("--line-porcelain".to_string());
 
-        // Match previous behavior: ignore whitespace
-        args.push("-w".to_string());
+        // Ignore whitespace option
+        if options.ignore_whitespace {
+            args.push("-w".to_string());
+        }
 
         // Respect ignore options in use
         for rev in &options.ignore_revs {
