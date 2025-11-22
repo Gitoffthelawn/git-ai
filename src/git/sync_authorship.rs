@@ -9,6 +9,15 @@ use crate::{
 
 use super::repository::Repository;
 
+/// Result of checking for authorship notes on a remote
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotesExistence {
+    /// Notes were found and fetched from the remote
+    Found,
+    /// Confirmed that no notes exist on the remote
+    NotFound,
+}
+
 pub fn fetch_remote_from_args(
     repository: &Repository,
     parsed_args: &ParsedGitInvocation,
@@ -42,10 +51,13 @@ pub fn fetch_remote_from_args(
 }
 
 // for use with post-fetch and post-pull and post-clone hooks
+// Returns Ok(NotesExistence::Found) if notes were found and fetched,
+// Ok(NotesExistence::NotFound) if confirmed no notes exist on remote,
+// Err(...) for actual errors (network, permissions, etc.)
 pub fn fetch_authorship_notes(
     repository: &Repository,
     remote_name: &str,
-) -> Result<(), GitAiError> {
+) -> Result<NotesExistence, GitAiError> {
     // Generate tracking ref for this remote
     let tracking_ref = tracking_ref_for_remote(&remote_name);
 
@@ -77,7 +89,7 @@ pub fn fetch_authorship_notes(
                     "no authorship notes found on remote '{}', nothing to sync",
                     remote_name
                 ));
-                return Ok(());
+                return Ok(NotesExistence::NotFound);
             }
             debug_log(&format!(
                 "found authorship notes on remote '{}'",
@@ -89,7 +101,8 @@ pub fn fetch_authorship_notes(
                 "failed to check for authorship notes on remote '{}': {}",
                 remote_name, e
             ));
-            return Ok(()); // Best-effort: if we can't check, silently continue
+            // Return error instead of assuming no notes - we don't know the state
+            return Err(e);
         }
     }
 
@@ -125,7 +138,7 @@ pub fn fetch_authorship_notes(
         }
         Err(e) => {
             debug_log(&format!("authorship fetch failed: {}", e));
-            return Ok(());
+            return Err(e);
         }
     }
 
@@ -161,7 +174,7 @@ pub fn fetch_authorship_notes(
         ));
     }
 
-    Ok(())
+    Ok(NotesExistence::Found)
 }
 // for use with post-push hook
 pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Result<(), GitAiError> {

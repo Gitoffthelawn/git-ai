@@ -1366,7 +1366,8 @@ impl Repository {
 
     #[allow(dead_code)]
     pub fn fetch_authorship<'a>(&'a self, remote_name: &str) -> Result<(), GitAiError> {
-        fetch_authorship_notes(self, remote_name)
+        // Discards whether notes were found or not, just returns success/error
+        fetch_authorship_notes(self, remote_name).map(|_| ())
     }
 
     #[allow(dead_code)]
