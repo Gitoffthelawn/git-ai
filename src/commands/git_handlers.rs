@@ -6,6 +6,7 @@ use crate::commands::hooks::merge_hooks;
 use crate::commands::hooks::push_hooks;
 use crate::commands::hooks::rebase_hooks;
 use crate::commands::hooks::reset_hooks;
+use crate::commands::hooks::stash_hooks;
 use crate::config;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::find_repository;
@@ -188,6 +189,9 @@ fn run_pre_command_hooks(
                 command_hooks_context.fetch_authorship_handle =
                     fetch_hooks::fetch_pull_pre_command_hook(parsed_args, repository);
             }
+            Some("stash") => {
+                stash_hooks::pre_stash_hook(parsed_args, repository);
+            }
             _ => {}
         }
     }));
@@ -248,6 +252,9 @@ fn run_post_command_hooks(
                 exit_status,
                 repository,
             ),
+            Some("stash") => {
+                stash_hooks::post_stash_hook(parsed_args, repository, exit_status);
+            }
             _ => {}
         }
     }));
