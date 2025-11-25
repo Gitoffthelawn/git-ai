@@ -6,8 +6,17 @@ use serde_json::json;
 use std::io::Write;
 use test_utils::fixture_path;
 
+/// Ensure CODESPACES and REMOTE_CONTAINERS are not set (they cause early return in transcript parsing)
+fn ensure_clean_env() {
+    unsafe {
+        std::env::remove_var("CODESPACES");
+        std::env::remove_var("REMOTE_CONTAINERS");
+    }
+}
+
 #[test]
 fn copilot_session_parsing_stub() {
+    ensure_clean_env();
     // Minimal valid shape with empty requests
     let sample = r#"{"requests": []}"#;
 
@@ -27,6 +36,7 @@ fn copilot_session_parsing_stub() {
 
 #[test]
 fn copilot_session_parsing_simple() {
+    ensure_clean_env();
     // Load the test fixture path
     let fixture = fixture_path("copilot_session_simple.json");
     let fixture_str = fixture.to_str().unwrap();
@@ -122,6 +132,7 @@ fn copilot_session_parsing_simple() {
 
 #[test]
 fn test_copilot_extracts_edited_filepaths() {
+    ensure_clean_env();
     let fixture = fixture_path("copilot_session_simple.json");
     let fixture_str = fixture.to_str().unwrap();
 
@@ -138,6 +149,7 @@ fn test_copilot_extracts_edited_filepaths() {
 
 #[test]
 fn test_copilot_no_edited_filepaths_when_no_edits() {
+    ensure_clean_env();
     let sample = r##"{
         "requests": [
             {
@@ -173,6 +185,7 @@ fn test_copilot_no_edited_filepaths_when_no_edits() {
 
 #[test]
 fn test_copilot_deduplicates_edited_filepaths() {
+    ensure_clean_env();
     let sample = r##"{
         "requests": [
             {
