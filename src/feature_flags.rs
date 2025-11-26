@@ -13,7 +13,7 @@ impl Default for FeatureFlags {
         {
             return FeatureFlags {
                 rewrite_stash: true,
-                proxy_push_notes_with_head: true,
+                proxy_push_notes_with_head: false,
             };
         }
         #[cfg(not(debug_assertions))]
