@@ -80,7 +80,7 @@ fn test_multiple_commits_cherry_pick() {
 
     // Create initial commit on default branch
     let mut file = repo.filename("file.txt");
-    file.set_contents(lines!["Line 1"]);
+    file.set_contents(lines!["Line 1", ""]);
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     let main_branch = repo.current_branch();
@@ -118,9 +118,10 @@ fn test_multiple_commits_cherry_pick() {
 
     // Verify stats for the last cherry-picked commit
     let stats = repo.stats().unwrap();
-    // Last commit inserts "AI line 4" in middle, stats include accumulated lines
+    // Last commit inserts "AI line 4" - git_diff_added_lines only counts this commit's changes
+    // ai_additions is capped by git_diff_added_lines, so it reflects this commit only
     assert!(stats.git_diff_added_lines > 0, "Should have added lines");
-    assert!(stats.ai_additions >= 2, "At least 2 AI lines");
+    assert!(stats.ai_additions >= 1, "At least 1 AI line in this commit");
     assert_eq!(stats.ai_accepted, 3, "3 AI lines accepted in commit");
 
     // Verify prompt records have correct stats

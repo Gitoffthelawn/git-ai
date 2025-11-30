@@ -310,7 +310,7 @@ fn test_ci_rebase_merge_multiple_commits() {
     let mut file = repo.filename("app.js");
 
     // Create initial commit
-    file.set_contents(lines!["// App v1"]);
+    file.set_contents(lines!["// App v1", ""]);
     let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
     repo.git(&["branch", "-M", "main"]).unwrap();
 

@@ -225,7 +225,7 @@ fn clone_and_init_repos() -> HashMap<String, TestRepo> {
         if !(repo_path.exists() && repo_path.join(".git").exists()) {
             // Clone the repository with full history
             let output = Command::new("git")
-                .args(&["clone", url, name])
+                .args(&["clone", url, name, "--depth=150000"])
                 .current_dir(&perf_repos_dir)
                 .output()
                 .expect(&format!("Failed to clone repository: {}", name));
