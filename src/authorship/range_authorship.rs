@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::authorship::rebase_authorship::filter_pathspecs_to_ai_touched_files;
 use crate::authorship::stats::{CommitStats, stats_for_commit_stats, stats_from_authorship_log};
 use crate::error::GitAiError;
 use crate::git::refs::{CommitAuthorship, get_commits_with_notes_from_list};
@@ -130,7 +131,8 @@ pub fn range_authorship(
     let commit_authorship = get_commits_with_notes_from_list(repository, &commit_shas)?;
 
     // Calculate range stats - now just pass start, end, and commits
-    let range_stats = calculate_range_stats_direct(repository, commit_range_clone, ignore_patterns)?;
+    let range_stats =
+        calculate_range_stats_direct(repository, commit_range_clone, ignore_patterns)?;
 
     Ok(RangeAuthorshipStats {
         authorship_stats: RangeAuthorshipStatsData {
@@ -200,6 +202,8 @@ fn create_authorship_log_for_range(
         .into_iter()
         .filter(|file| !should_ignore_file(file, ignore_patterns))
         .collect();
+
+    let changed_files = filter_pathspecs_to_ai_touched_files(repo, commit_shas, &changed_files)?;
 
     if changed_files.is_empty() {
         // No files changed, return empty authorship log
@@ -412,7 +416,8 @@ fn calculate_range_stats_direct(
 
     // Step 2: Create in-memory authorship log for the range, filtered to only commits in the range
     let commit_shas = commit_range.clone().all_commits();
-    let authorship_log = create_authorship_log_for_range(repo, &start_sha, &end_sha, &commit_shas, ignore_patterns)?;
+    let authorship_log =
+        create_authorship_log_for_range(repo, &start_sha, &end_sha, &commit_shas, ignore_patterns)?;
 
     // Step 3: Calculate stats from the authorship log
     let stats = stats_from_authorship_log(
@@ -525,7 +530,9 @@ mod tests {
         let tmp_repo = TmpRepo::new().unwrap();
 
         // Create initial commit with AI work
-        let mut file = tmp_repo.write_file("test.txt", "AI Line 1\n", true).unwrap();
+        let mut file = tmp_repo
+            .write_file("test.txt", "AI Line 1\n", true)
+            .unwrap();
         tmp_repo
             .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
             .unwrap();
@@ -609,7 +616,9 @@ mod tests {
         let tmp_repo = TmpRepo::new().unwrap();
 
         // Create initial commit with human work
-        let mut file = tmp_repo.write_file("test.txt", "Human Line 1\n", true).unwrap();
+        let mut file = tmp_repo
+            .write_file("test.txt", "Human Line 1\n", true)
+            .unwrap();
         tmp_repo
             .trigger_checkpoint_with_author("test_user")
             .unwrap();
@@ -710,7 +719,9 @@ mod tests {
         tmp_repo
             .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
             .unwrap();
-        tmp_repo.commit_with_message("Initial multi-file commit").unwrap();
+        tmp_repo
+            .commit_with_message("Initial multi-file commit")
+            .unwrap();
         let head_sha = tmp_repo.get_head_commit_sha().unwrap();
 
         // Test range authorship from empty tree
@@ -741,7 +752,9 @@ mod tests {
         let tmp_repo = TmpRepo::new().unwrap();
 
         // Create initial commit with a source file
-        tmp_repo.write_file("src/main.rs", "fn main() {}\n", true).unwrap();
+        tmp_repo
+            .write_file("src/main.rs", "fn main() {}\n", true)
+            .unwrap();
         tmp_repo
             .trigger_checkpoint_with_author("test_user")
             .unwrap();
@@ -750,15 +763,25 @@ mod tests {
 
         // Add AI work to source file and also change a lockfile
         tmp_repo
-            .write_file("src/main.rs", "fn main() {}\n// AI added code\nfn helper() {}\n", true)
+            .write_file(
+                "src/main.rs",
+                "fn main() {}\n// AI added code\nfn helper() {}\n",
+                true,
+            )
             .unwrap();
         tmp_repo
-            .write_file("Cargo.lock", "# Large lockfile with 1000 lines\n".repeat(1000).as_str(), true)
+            .write_file(
+                "Cargo.lock",
+                "# Large lockfile with 1000 lines\n".repeat(1000).as_str(),
+                true,
+            )
             .unwrap();
         tmp_repo
             .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
             .unwrap();
-        tmp_repo.commit_with_message("Add helper and update deps").unwrap();
+        tmp_repo
+            .commit_with_message("Add helper and update deps")
+            .unwrap();
         let second_sha = tmp_repo.get_head_commit_sha().unwrap();
 
         // Test range authorship
@@ -791,7 +814,9 @@ mod tests {
         let tmp_repo = TmpRepo::new().unwrap();
 
         // Create initial commit
-        tmp_repo.write_file("src/lib.rs", "pub fn old() {}\n", true).unwrap();
+        tmp_repo
+            .write_file("src/lib.rs", "pub fn old() {}\n", true)
+            .unwrap();
         tmp_repo
             .trigger_checkpoint_with_author("test_user")
             .unwrap();
@@ -799,7 +824,9 @@ mod tests {
         let first_sha = tmp_repo.get_head_commit_sha().unwrap();
 
         // Human adds to source file
-        tmp_repo.write_file("src/lib.rs", "pub fn old() {}\npub fn new() {}\n", true).unwrap();
+        tmp_repo
+            .write_file("src/lib.rs", "pub fn old() {}\npub fn new() {}\n", true)
+            .unwrap();
         tmp_repo
             .trigger_checkpoint_with_author("test_user")
             .unwrap();
@@ -807,15 +834,25 @@ mod tests {
 
         // AI adds to source file, and package-lock.json is updated (with 1000 lines)
         tmp_repo
-            .write_file("src/lib.rs", "pub fn old() {}\npub fn new() {}\n// AI comment\npub fn ai_func() {}\n", true)
+            .write_file(
+                "src/lib.rs",
+                "pub fn old() {}\npub fn new() {}\n// AI comment\npub fn ai_func() {}\n",
+                true,
+            )
             .unwrap();
         tmp_repo
-            .write_file("package-lock.json", "{\n  \"lockfileVersion\": 2,\n}\n".repeat(1000).as_str(), true)
+            .write_file(
+                "package-lock.json",
+                "{\n  \"lockfileVersion\": 2,\n}\n".repeat(1000).as_str(),
+                true,
+            )
             .unwrap();
         tmp_repo
             .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
             .unwrap();
-        tmp_repo.commit_with_message("AI adds function and updates deps").unwrap();
+        tmp_repo
+            .commit_with_message("AI adds function and updates deps")
+            .unwrap();
         let head_sha = tmp_repo.get_head_commit_sha().unwrap();
 
         // Test range authorship
@@ -850,7 +887,9 @@ mod tests {
         let tmp_repo = TmpRepo::new().unwrap();
 
         // Create initial commit
-        tmp_repo.write_file("README.md", "# Project\n", true).unwrap();
+        tmp_repo
+            .write_file("README.md", "# Project\n", true)
+            .unwrap();
         tmp_repo
             .trigger_checkpoint_with_author("test_user")
             .unwrap();
@@ -858,11 +897,21 @@ mod tests {
         let first_sha = tmp_repo.get_head_commit_sha().unwrap();
 
         // Add multiple lockfiles and one real source change
-        tmp_repo.write_file("Cargo.lock", "# Cargo lock\n".repeat(500).as_str(), true).unwrap();
-        tmp_repo.write_file("yarn.lock", "# yarn lock\n".repeat(500).as_str(), true).unwrap();
-        tmp_repo.write_file("poetry.lock", "# poetry lock\n".repeat(500).as_str(), true).unwrap();
-        tmp_repo.write_file("go.sum", "# go sum\n".repeat(500).as_str(), true).unwrap();
-        tmp_repo.write_file("README.md", "# Project\n## New Section\n", true).unwrap();
+        tmp_repo
+            .write_file("Cargo.lock", "# Cargo lock\n".repeat(500).as_str(), true)
+            .unwrap();
+        tmp_repo
+            .write_file("yarn.lock", "# yarn lock\n".repeat(500).as_str(), true)
+            .unwrap();
+        tmp_repo
+            .write_file("poetry.lock", "# poetry lock\n".repeat(500).as_str(), true)
+            .unwrap();
+        tmp_repo
+            .write_file("go.sum", "# go sum\n".repeat(500).as_str(), true)
+            .unwrap();
+        tmp_repo
+            .write_file("README.md", "# Project\n## New Section\n", true)
+            .unwrap();
         tmp_repo
             .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
             .unwrap();
@@ -899,7 +948,9 @@ mod tests {
         let tmp_repo = TmpRepo::new().unwrap();
 
         // Create initial commit
-        tmp_repo.write_file("src/main.rs", "fn main() {}\n", true).unwrap();
+        tmp_repo
+            .write_file("src/main.rs", "fn main() {}\n", true)
+            .unwrap();
         tmp_repo
             .trigger_checkpoint_with_author("test_user")
             .unwrap();
@@ -908,7 +959,11 @@ mod tests {
 
         // Commit that only changes lockfiles (common scenario)
         tmp_repo
-            .write_file("package-lock.json", "{\n  \"version\": \"1.0.0\"\n}\n".repeat(1000).as_str(), true)
+            .write_file(
+                "package-lock.json",
+                "{\n  \"version\": \"1.0.0\"\n}\n".repeat(1000).as_str(),
+                true,
+            )
             .unwrap();
         tmp_repo
             .write_file("yarn.lock", "# yarn\n".repeat(500).as_str(), true)
@@ -916,7 +971,9 @@ mod tests {
         tmp_repo
             .trigger_checkpoint_with_author("test_user")
             .unwrap();
-        tmp_repo.commit_with_message("Update lockfiles only").unwrap();
+        tmp_repo
+            .commit_with_message("Update lockfiles only")
+            .unwrap();
         let second_sha = tmp_repo.get_head_commit_sha().unwrap();
 
         // Test range authorship
@@ -958,7 +1015,10 @@ mod tests {
         assert!(should_ignore_file("go.sum", &lockfile_patterns));
 
         // Test with paths
-        assert!(should_ignore_file("src/package-lock.json", &lockfile_patterns));
+        assert!(should_ignore_file(
+            "src/package-lock.json",
+            &lockfile_patterns
+        ));
         assert!(should_ignore_file("backend/Cargo.lock", &lockfile_patterns));
         assert!(should_ignore_file("./yarn.lock", &lockfile_patterns));
 
@@ -1006,7 +1066,10 @@ mod tests {
 
         // Should match files in target directory at any depth
         assert!(should_ignore_file("target/debug/foo", &path_patterns));
-        assert!(should_ignore_file("backend/target/release/bar", &path_patterns));
+        assert!(should_ignore_file(
+            "backend/target/release/bar",
+            &path_patterns
+        ));
         assert!(should_ignore_file("project/target/file.rs", &path_patterns));
 
         // Should not match files outside target
@@ -1015,7 +1078,10 @@ mod tests {
 
         // Test specific directory patterns
         let dir_patterns = vec!["node_modules/**".to_string()];
-        assert!(should_ignore_file("node_modules/package/index.js", &dir_patterns));
+        assert!(should_ignore_file(
+            "node_modules/package/index.js",
+            &dir_patterns
+        ));
         assert!(should_ignore_file("node_modules/foo.js", &dir_patterns));
         assert!(!should_ignore_file("src/node_modules.rs", &dir_patterns));
     }
@@ -1027,7 +1093,10 @@ mod tests {
 
         assert!(should_ignore_file("generated-api.ts", &prefix_patterns));
         assert!(should_ignore_file("generated-schema.js", &prefix_patterns));
-        assert!(should_ignore_file("src/generated-types.d.ts", &prefix_patterns));
+        assert!(should_ignore_file(
+            "src/generated-types.d.ts",
+            &prefix_patterns
+        ));
         assert!(!should_ignore_file("api-generated.ts", &prefix_patterns));
         assert!(!should_ignore_file("manual.ts", &prefix_patterns));
     }
@@ -1043,12 +1112,18 @@ mod tests {
         ];
 
         // Glob patterns with multiple wildcards
-        assert!(should_ignore_file("src/api.generated.js", &complex_patterns));
+        assert!(should_ignore_file(
+            "src/api.generated.js",
+            &complex_patterns
+        ));
         assert!(should_ignore_file("types.generated.ts", &complex_patterns));
         assert!(should_ignore_file("package-lock.json", &complex_patterns));
         assert!(should_ignore_file("yarn-lock.yaml", &complex_patterns));
         assert!(should_ignore_file("dist/bundle.js", &complex_patterns));
-        assert!(should_ignore_file("dist/nested/file.css", &complex_patterns));
+        assert!(should_ignore_file(
+            "dist/nested/file.css",
+            &complex_patterns
+        ));
 
         assert!(!should_ignore_file("src/manual.js", &complex_patterns));
         assert!(!should_ignore_file("lock.txt", &complex_patterns));
@@ -1058,10 +1133,10 @@ mod tests {
     fn test_should_ignore_file_mixed_exact_and_glob() {
         // Test mixing exact matches and glob patterns
         let mixed_patterns = vec![
-            "Cargo.lock".to_string(),      // Exact match
-            "*.generated.js".to_string(),  // Glob pattern
+            "Cargo.lock".to_string(),        // Exact match
+            "*.generated.js".to_string(),    // Glob pattern
             "package-lock.json".to_string(), // Exact match
-            "**/target/**".to_string(),    // Path glob
+            "**/target/**".to_string(),      // Path glob
         ];
 
         // Exact matches
@@ -1106,7 +1181,10 @@ mod tests {
 
         // Files with spaces
         assert!(should_ignore_file("file with spaces.txt", &patterns));
-        assert!(should_ignore_file("path/to/file with spaces.txt", &patterns));
+        assert!(should_ignore_file(
+            "path/to/file with spaces.txt",
+            &patterns
+        ));
 
         // Files with dashes and underscores
         assert!(should_ignore_file("file-with-dashes.js", &patterns));
@@ -1124,11 +1202,7 @@ mod tests {
     #[test]
     fn test_should_ignore_file_hidden_files() {
         // Test hidden files (starting with .)
-        let patterns = vec![
-            ".env".to_string(),
-            ".*.swp".to_string(),
-            ".*rc".to_string(),
-        ];
+        let patterns = vec![".env".to_string(), ".*.swp".to_string(), ".*rc".to_string()];
 
         // Hidden files
         assert!(should_ignore_file(".env", &patterns));
@@ -1207,9 +1281,15 @@ mod tests {
         ];
 
         // Deep nesting
-        assert!(should_ignore_file("node_modules/package/index.js", &patterns));
+        assert!(should_ignore_file(
+            "node_modules/package/index.js",
+            &patterns
+        ));
         assert!(should_ignore_file("a/b/c/node_modules/d/e/f.js", &patterns));
-        assert!(should_ignore_file("project/build/output/bundle.js", &patterns));
+        assert!(should_ignore_file(
+            "project/build/output/bundle.js",
+            &patterns
+        ));
         assert!(should_ignore_file(".git/objects/ab/cdef123", &patterns));
         assert!(should_ignore_file("repo/.git/hooks/pre-commit", &patterns));
 
@@ -1222,10 +1302,7 @@ mod tests {
     #[test]
     fn test_should_ignore_file_partial_matches() {
         // Test that partial matches don't incorrectly match
-        let patterns = vec![
-            "lock".to_string(),
-            "*.lock".to_string(),
-        ];
+        let patterns = vec!["lock".to_string(), "*.lock".to_string()];
 
         // Should match
         assert!(should_ignore_file("lock", &patterns));
@@ -1241,10 +1318,7 @@ mod tests {
     #[test]
     fn test_should_ignore_file_with_wildcards_in_middle() {
         // Test patterns with wildcards in the middle
-        let patterns = vec![
-            "test-*-output.log".to_string(),
-            "backup-*.sql".to_string(),
-        ];
+        let patterns = vec!["test-*-output.log".to_string(), "backup-*.sql".to_string()];
 
         // Should match
         assert!(should_ignore_file("test-123-output.log", &patterns));
@@ -1311,7 +1385,9 @@ mod tests {
         let tmp_repo = TmpRepo::new().unwrap();
 
         // Initial commit
-        tmp_repo.write_file("src/main.rs", "fn main() {}\n", true).unwrap();
+        tmp_repo
+            .write_file("src/main.rs", "fn main() {}\n", true)
+            .unwrap();
         tmp_repo
             .trigger_checkpoint_with_author("test_user")
             .unwrap();
@@ -1329,7 +1405,11 @@ mod tests {
             .write_file("package-lock.json", "{}\n".repeat(500).as_str(), true)
             .unwrap();
         tmp_repo
-            .write_file("api.generated.js", "// generated\n".repeat(200).as_str(), true)
+            .write_file(
+                "api.generated.js",
+                "// generated\n".repeat(200).as_str(),
+                true,
+            )
             .unwrap();
         tmp_repo
             .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
@@ -1348,7 +1428,7 @@ mod tests {
         // Use glob patterns to ignore lockfiles and generated files
         let glob_patterns = vec![
             "*.lock".to_string(),
-            "*lock.json".to_string(),  // Matches package-lock.json
+            "*lock.json".to_string(), // Matches package-lock.json
             "*.generated.*".to_string(),
         ];
         let stats = range_authorship(commit_range, false, &glob_patterns).unwrap();
