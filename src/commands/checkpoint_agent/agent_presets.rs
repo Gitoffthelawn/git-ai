@@ -749,18 +749,26 @@ impl AgentCheckpointPreset for CursorPreset {
                 })?;
 
             // Get the most recent file content from the working log
-            let old_content = Self::get_most_recent_file_content(&repo_working_dir, &file_path)
+            let old_content = match Self::get_most_recent_file_content(&repo_working_dir, &file_path)
                 .map(|(content, _blob_sha)| content)
-                .unwrap_or_else(|| {
-                    // If no checkpoint exists, try to read from filesystem as fallback
-                    std::fs::read_to_string(&file_path).unwrap_or_default()
-                });
+            {
+                Some(content) => content,
+                None => {
+                    return Err(GitAiError::PresetError(format!(
+                        "No checkpoint exists for file '{}', cannot reconstruct pre-edit content for afterTabFileEdit",
+                        file_path
+                    )))
+                }
+            };
 
             // Apply the edits to get the new content
-            let new_content = Self::apply_edits_to_content(&old_content, edits).unwrap_or_else(|e| {
-                eprintln!("[Warning] Failed to apply edits for afterTabFileEdit: {}", e);
-                old_content.clone()
-            });
+            let new_content = Self::apply_edits_to_content(&old_content, edits)
+                .map_err(|e| {
+                    GitAiError::PresetError(format!(
+                        "Failed to apply edits for afterTabFileEdit: {}",
+                        e
+                    ))
+                })?;
 
             // Create dirty_files with the new content
             let mut dirty_files = HashMap::new();
@@ -903,6 +911,12 @@ impl CursorPreset {
             }
         }
 
+        // Fallback: try to read the file content from HEAD for this repository
+        if let Ok(bytes) = repo.get_file_content(&relative_file_path, &base_commit) {
+            let content = String::from_utf8_lossy(&bytes).to_string();
+            return Some((content, String::new()));
+        }
+
         None
     }
 
@@ -912,17 +926,69 @@ impl CursorPreset {
         old_content: &str,
         edits: &serde_json::Value,
     ) -> Result<String, GitAiError> {
-        let edits_array = edits.as_array().ok_or_else(|| {
-            GitAiError::PresetError("edits must be an array".to_string())
-        })?;
+        let edits_array = edits
+            .as_array()
+            .ok_or_else(|| GitAiError::PresetError("edits must be an array".to_string()))?;
 
-        let mut lines: Vec<String> = old_content.lines().map(|s| s.to_string()).collect();
+        if edits_array.is_empty() {
+            return Ok(old_content.to_string());
+        }
 
-        // Apply each edit in order
-        for edit in edits_array {
-            let range = edit.get("range").ok_or_else(|| {
-                GitAiError::PresetError("edit missing range field".to_string())
+        // Track the starting character offset of each line (1-indexed lines -> 0-indexed offsets)
+        let mut line_start_positions: Vec<usize> = vec![0];
+        let mut total_chars = 0usize;
+        for ch in old_content.chars() {
+            total_chars += 1;
+            if ch == '\n' {
+                // Next line starts after this newline
+                line_start_positions.push(total_chars);
+            }
+        }
+
+        // Map character offsets to byte offsets so we can safely slice the string
+        let mut char_to_byte: Vec<usize> = Vec::with_capacity(total_chars + 1);
+        for (byte_idx, _) in old_content.char_indices() {
+            char_to_byte.push(byte_idx);
+        }
+        char_to_byte.push(old_content.len());
+
+        // Helper to convert (line, column) -> character offset, clamping columns to the end of the line
+        let line_col_to_offset = |line: usize, col: usize| -> Result<usize, GitAiError> {
+            if line == 0 {
+                return Err(GitAiError::PresetError(
+                    "line numbers are 1-indexed in Cursor edits".to_string(),
+                ));
+            }
+
+            let line_idx = line - 1;
+            let line_start = *line_start_positions.get(line_idx).ok_or_else(|| {
+                GitAiError::PresetError(format!("line {} not found in original content", line))
             })?;
+
+            // The next line start (if present) is one char past the newline
+            let line_end_exclusive = if let Some(next_line_start) = line_start_positions.get(line_idx + 1) {
+                next_line_start.saturating_sub(1) // Exclude the newline itself
+            } else {
+                total_chars
+            };
+
+            let line_len = line_end_exclusive.saturating_sub(line_start);
+            let col_idx = col.saturating_sub(1).min(line_len);
+            Ok(line_start + col_idx)
+        };
+
+        struct TabEdit {
+            start_offset: usize,
+            end_offset: usize,
+            new_text: String,
+        }
+
+        let mut parsed_edits: Vec<TabEdit> = Vec::with_capacity(edits_array.len());
+
+        for edit in edits_array {
+            let range = edit
+                .get("range")
+                .ok_or_else(|| GitAiError::PresetError("edit missing range field".to_string()))?;
 
             let start_line = range
                 .get("start_line_number")
@@ -955,54 +1021,60 @@ impl CursorPreset {
             let new_string = edit
                 .get("new_string")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
+                .unwrap_or("")
+                .to_string();
 
-            // Convert 1-indexed line numbers to 0-indexed
-            let start_line_idx = start_line.saturating_sub(1);
-            let end_line_idx = end_line.saturating_sub(1);
+            let start_offset = line_col_to_offset(start_line, start_col)?;
+            let end_offset = line_col_to_offset(end_line, end_col)?;
 
-            // Ensure we have enough lines
-            while lines.len() <= end_line_idx {
-                lines.push(String::new());
+            if start_offset > end_offset {
+                return Err(GitAiError::PresetError(format!(
+                    "edit start offset {} is after end offset {}",
+                    start_offset, end_offset
+                )));
             }
 
-            if start_line_idx == end_line_idx {
-                // Single-line edit
-                let line = &lines[start_line_idx];
-                // Convert 1-indexed columns to 0-indexed
-                let start_col_idx = start_col.saturating_sub(1);
-                let end_col_idx = end_col.saturating_sub(1);
-
-                // Split the line and insert the new string
-                let before = if start_col_idx < line.len() {
-                    &line[..start_col_idx]
-                } else {
-                    line.as_str()
-                };
-                let after = if end_col_idx < line.len() {
-                    &line[end_col_idx..]
-                } else {
-                    ""
-                };
-
-                lines[start_line_idx] = format!("{}{}{}", before, new_string, after);
-            } else {
-                // Multi-line edit - for now, treat as single-line at start position
-                // This is a simplification; full implementation would handle multi-line edits
-                let line = &lines[start_line_idx];
-                let start_col_idx = start_col.saturating_sub(1);
-
-                let before = if start_col_idx < line.len() {
-                    &line[..start_col_idx]
-                } else {
-                    line.as_str()
-                };
-
-                lines[start_line_idx] = format!("{}{}", before, new_string);
-            }
+            parsed_edits.push(TabEdit {
+                start_offset,
+                end_offset,
+                new_text: new_string,
+            });
         }
 
-        Ok(lines.join("\n"))
+        // Apply edits from the end of the file backwards so earlier offsets remain valid
+        parsed_edits.sort_by(|a, b| {
+            b.start_offset
+                .cmp(&a.start_offset)
+                .then_with(|| b.end_offset.cmp(&a.end_offset))
+        });
+
+        let mut result = old_content.to_string();
+        for edit in parsed_edits {
+            let start_byte = *char_to_byte.get(edit.start_offset).ok_or_else(|| {
+                GitAiError::PresetError(format!(
+                    "failed to convert start offset {} to byte index",
+                    edit.start_offset
+                ))
+            })?;
+
+            let end_byte = *char_to_byte.get(edit.end_offset).ok_or_else(|| {
+                GitAiError::PresetError(format!(
+                    "failed to convert end offset {} to byte index",
+                    edit.end_offset
+                ))
+            })?;
+
+            if start_byte > end_byte || end_byte > result.len() {
+                return Err(GitAiError::PresetError(format!(
+                    "invalid byte range {}..{} for edit",
+                    start_byte, end_byte
+                )));
+            }
+
+            result.replace_range(start_byte..end_byte, &edit.new_text);
+        }
+
+        Ok(result)
     }
 
     /// Fetch the latest version of a Cursor conversation from the database
