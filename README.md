@@ -64,11 +64,25 @@ A PR Bot aggregates `git-ai` data at the PR, Repository and Organization levels:
 
 🚀 **Git-native + Fast** - `git-ai` is built on git plumbing commands. Negligible impact even in large repos (&lt;100ms). Tested in [Chromium](https://github.com/chromium/chromium).
 
-## Documentation
+## [Documentation](https://usegitai.com/docs)
 
 - How Git AI Works and its Limitations [▶️ Video](https://www.youtube.com/watch?v=b_DZTC1PKHI) [🗺️ Diagram](https://usegitai.com/docs/how-git-ai-works)
 - [Git AI Commands](https://usegitai.com/docs/reference)
 - [Configuring Git AI for the enterprise](https://usegitai.com/docs/administration/enterprise-configuration)
+
+## Prompt Saving
+By default Git AI does not save prompts in AI Authorship Notes. You can start saving/sharing by running the following command
+
+*from within a repository*
+
+```bash
+git-ai config set share_prompts_in_repositories .  --add
+```
+*with an explicit remote*
+
+```bash
+git-ai config set share_prompts_in_repositories https://github.com/org/repo.git  --add
+```
 
 ## Agent Support
 
