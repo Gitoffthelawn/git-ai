@@ -236,6 +236,87 @@ Automatically configure Claude Code, Cursor and GitHub Copilot to send authorshi
 git-ai install-hooks
 ```
 
+##### `config`
+
+View and manage git-ai configuration settings.
+
+```bash
+# Show all config as formatted JSON
+git-ai config
+
+# Show specific config value
+git-ai config <key>
+
+# Set a config value
+git-ai config set <key> <value>
+
+# Add to array (extends existing)
+git-ai config set <key> <value> --add
+git-ai config --add <key> <value>
+
+# Remove config value (reverts to default)
+git-ai config unset <key>
+```
+
+**Arguments:**
+- `<key>` - Configuration key to view, set, or unset
+- `<value>` - Value to set for the configuration key
+
+**Options:**
+- `--add` - When setting array values, add to existing array instead of replacing it. When setting object values (like feature flags), upsert into the object.
+
+**Configuration Keys:**
+
+- **git_path** - Path to git binary
+- **share_prompts_in_repositories** - Repositories to share prompts in (array)
+- **allow_repositories** - Allowed repositories (array)
+- **exclude_repositories** - Excluded repositories (array)
+- **telemetry_oss** - OSS telemetry setting (on/off)
+- **telemetry_enterprise_dsn** - Enterprise telemetry DSN
+- **disable_version_checks** - Disable version checks (bool: true/false)
+- **disable_auto_updates** - Disable auto updates (bool: true/false)
+- **update_channel** - Update channel (latest/next)
+- **feature_flags** - Feature flags (object, supports dot notation like `feature_flags.my_flag`)
+
+**Repository Patterns:**
+
+For `exclude_repositories`, `allow_repositories`, and `share_prompts_in_repositories`, you can provide:
+
+- **Glob pattern**: `"*"`, `"https://github.com/org/*"`
+- **URL/git protocol**: `"git@github.com:org/repo.git"`, `"https://github.com/org/repo.git"`
+- **File path**: `"."` or `"/path/to/repo"` (resolves to repository's remotes)
+
+When a file path is provided, git-ai will automatically resolve it to the repository's remote URLs.
+
+**Examples:**
+
+```bash
+# View all configuration
+git-ai config
+
+# View a specific setting
+git-ai config exclude_repositories
+
+# Set a boolean value
+git-ai config set disable_auto_updates true
+
+# Set repository exclusion using glob pattern
+git-ai config set exclude_repositories "private/*"
+
+# Set repository exclusion using current repo (resolves to remotes)
+git-ai config set exclude_repositories .
+
+# Add to array without replacing existing values
+git-ai config --add exclude_repositories "temp/*"
+git-ai config --add allow_repositories ~/projects/my-repo
+
+# Set feature flag using dot notation
+git-ai config set feature_flags.my_flag true
+git-ai config --add feature_flags.another_flag false
+
+# Remove a configuration value
+git-ai config unset exclude_repositories
+```
 
 ## Plumbing Commands (for AI Agents)
 
