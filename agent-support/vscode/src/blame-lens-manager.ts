@@ -34,7 +34,7 @@ export class BlameLensManager implements vscode.CodeLensProvider {
     'rgba(249, 115, 22, 0.8)',   // Deep Orange
     'rgba(168, 85, 247, 0.8)',   // Violet
     'rgba(236, 72, 153, 0.8)',   // Hot Pink
-    'rgba(34, 197, 94, 0.8)',    // Green
+    'rgba(148, 163, 184, 0.8)',  // Cool Gray
     'rgba(59, 130, 246, 0.8)',   // Bright Blue
     'rgba(139, 92, 246, 0.8)',   // Purple Violet
     'rgba(234, 179, 8, 0.8)',    // Gold
@@ -62,7 +62,7 @@ export class BlameLensManager implements vscode.CodeLensProvider {
     'rgba(251, 207, 232, 0.8)',  // Pale Pink
     'rgba(129, 140, 248, 0.8)',  // Medium Indigo
     'rgba(248, 113, 113, 0.8)',  // Medium Red
-    'rgba(74, 222, 128, 0.8)',   // Medium Green
+    'rgba(255, 112, 67, 0.8)',   // Coral
     'rgba(45, 212, 191, 0.8)',   // Medium Teal
     'rgba(251, 146, 189, 0.8)',  // Medium Pink
   ];
