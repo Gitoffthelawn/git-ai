@@ -4,10 +4,6 @@
         "how-git-ai-works",
         "reference",
         "limitations",
-        "---Agents---",
-        "cursor",
-        "claude-code",
-        "vs-code-github-copilot",
         "add-your-agent.mdx"
     ]
 }
