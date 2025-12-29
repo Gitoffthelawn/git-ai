@@ -34,11 +34,7 @@ struct ShareConfig {
 
 impl ShareConfig {
     fn new(prompt: &PromptDbRecord) -> Self {
-        let title = format!(
-            "{} ({})",
-            prompt.first_message_snippet(60),
-            prompt.tool
-        );
+        let title = prompt.first_message_snippet(60);
 
         let can_share_commit = prompt.commit_sha.is_some();
 

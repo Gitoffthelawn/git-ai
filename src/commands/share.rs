@@ -46,11 +46,19 @@ fn handle_share_cli(parsed: ParsedArgs) {
 
     // Generate a title if not provided
     let title = parsed.title.unwrap_or_else(|| {
-        format!(
-            "Prompt {} ({})",
-            parsed.prompt_id,
-            prompt_record.agent_id.tool
-        )
+        // Try to get snippet from database
+        use crate::authorship::internal_db::InternalDatabase;
+
+        if let Ok(db) = InternalDatabase::global() {
+            if let Ok(db_guard) = db.lock() {
+                if let Ok(Some(db_record)) = db_guard.get_prompt(&parsed.prompt_id) {
+                    return db_record.first_message_snippet(60);
+                }
+            }
+        }
+
+        // Fallback if not in database
+        format!("Prompt {}", parsed.prompt_id)
     });
 
     // Create bundle using helper (single prompt only in CLI mode)
