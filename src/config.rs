@@ -451,18 +451,29 @@ pub fn config_file_path_public() -> Option<PathBuf> {
     config_file_path()
 }
 
-/// Public accessor for ID file path
-pub fn id_file_path() -> Option<PathBuf> {
+/// Returns the path to the internal state directory (~/.git-ai/internal)
+/// This is where git-ai stores internal files like distinct_id, update_check, etc.
+pub fn internal_dir_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         let home = env::var("USERPROFILE").ok()?;
-        Some(Path::new(&home).join(".git-ai").join("distinct_id"))
+        Some(Path::new(&home).join(".git-ai").join("internal"))
     }
     #[cfg(not(windows))]
     {
         let home = env::var("HOME").ok()?;
-        Some(Path::new(&home).join(".git-ai").join("distinct_id"))
+        Some(Path::new(&home).join(".git-ai").join("internal"))
     }
+}
+
+/// Public accessor for ID file path (~/.git-ai/internal/distinct_id)
+pub fn id_file_path() -> Option<PathBuf> {
+    internal_dir_path().map(|dir| dir.join("distinct_id"))
+}
+
+/// Returns the path to the update check cache file (~/.git-ai/internal/update_check)
+pub fn update_check_path() -> Option<PathBuf> {
+    internal_dir_path().map(|dir| dir.join("update_check"))
 }
 
 /// Load the raw file config

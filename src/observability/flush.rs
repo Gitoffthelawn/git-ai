@@ -103,7 +103,7 @@ pub fn handle_flush_logs(args: &[String]) {
         .and_then(|r| r.remotes_with_urls().ok())
         .unwrap_or_default();
 
-    // Get or create distinct_id from ~/.git-ai/distinct_id
+    // Get or create distinct_id from ~/.git-ai/internal/distinct_id
     let distinct_id = get_or_create_distinct_id();
 
     // Initialize Sentry clients
@@ -613,7 +613,7 @@ fn send_envelope_to_posthog(
     }
 }
 
-/// Get or create the distinct_id (UUID) from ~/.git-ai/distinct_id
+/// Get or create the distinct_id (UUID) from ~/.git-ai/internal/distinct_id
 /// If the file doesn't exist, generates a new UUID and writes it to the file
 fn get_or_create_distinct_id() -> String {
     let id_path = match id_file_path() {

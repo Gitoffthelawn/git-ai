@@ -1,4 +1,5 @@
 use crate::config::{self, UpdateChannel};
+use crate::observability::log_message;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::IsTerminal;
@@ -14,11 +15,9 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const UPDATE_CHECK_INTERVAL_HOURS: u64 = 24;
-const INSTALL_SCRIPT_URL: &str =
-    "https://raw.githubusercontent.com/acunniffe/git-ai/main/install.sh";
+const INSTALL_SCRIPT_URL: &str = "https://usegitai.com/install.sh";
 #[cfg(windows)]
-const INSTALL_SCRIPT_PS1_URL: &str =
-    "https://raw.githubusercontent.com/acunniffe/git-ai/main/install.ps1";
+const INSTALL_SCRIPT_PS1_URL: &str = "https://usegitai.com/install.ps1";
 const RELEASES_API_URL: &str = "https://usegitai.com/api/releases";
 const GIT_AI_RELEASE_ENV: &str = "GIT_AI_RELEASE_TAG";
 const BACKGROUND_SPAWN_THROTTLE_SECS: u64 = 60;
@@ -32,6 +31,17 @@ enum UpgradeAction {
     AlreadyLatest,
     RunningNewerVersion,
     ForceReinstall,
+}
+
+impl UpgradeAction {
+    fn to_string(&self) -> &str {
+        match self {
+            UpgradeAction::UpgradeAvailable => "upgrade_available",
+            UpgradeAction::AlreadyLatest => "already_latest",
+            UpgradeAction::RunningNewerVersion => "running_newer_version",
+            UpgradeAction::ForceReinstall => "force_reinstall",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,11 +87,11 @@ fn get_update_check_cache_path() -> Option<PathBuf> {
     #[cfg(test)]
     {
         if let Ok(test_cache_dir) = std::env::var("GIT_AI_TEST_CACHE_DIR") {
-            return Some(PathBuf::from(test_cache_dir).join(".update_check"));
+            return Some(PathBuf::from(test_cache_dir).join("update_check"));
         }
     }
 
-    dirs::home_dir().map(|home| home.join(".git-ai").join(".update_check"))
+    crate::config::update_check_path()
 }
 
 fn read_update_cache() -> Option<UpdateCache> {
@@ -386,6 +396,17 @@ fn run_impl_with_url(
     let cache_release = matches!(action, UpgradeAction::UpgradeAvailable);
     persist_update_state(channel, cache_release.then_some(&release));
 
+    log_message(
+        "checked_for_update",
+        "info",
+        Some(serde_json::json!({
+            "current_version": current_version,
+            "api_base_url": api_base_url,
+            "channel": channel.as_str(),
+            "result": action.to_string()
+        })),
+    );
+
     match action {
         UpgradeAction::AlreadyLatest => {
             println!("You are already on the latest version!");
@@ -428,6 +449,17 @@ fn run_impl_with_url(
             {
                 println!("\x1b[1;32m✓\x1b[0m Successfully installed {}!", release.tag);
             }
+
+            log_message(
+                "upgraded",
+                "info",
+                Some(serde_json::json!({
+                    "release_tag": release.tag,
+                    "current_version": current_version,
+                    "api_base_url": api_base_url,
+                    "channel": channel.as_str()
+                })),
+            );
         }
         Err(err) => {
             eprintln!("{}", err);

@@ -113,7 +113,6 @@ pub fn handle_git_ai(args: &[String]) {
             commands::upgrade::run_with_args(&args[1..]);
         }
         "flush-logs" => {
-            log_message("flush_logs", "info", None);
             commands::flush_logs::handle_flush_logs(&args[1..]);
         }
         "show-prompt" => {

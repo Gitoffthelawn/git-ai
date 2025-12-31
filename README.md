@@ -15,13 +15,13 @@
 #### Mac, Linux, Windows (WSL)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/acunniffe/git-ai/main/install.sh | bash
+curl -sSL https://usegitai.com/install.sh | bash
 ```
 
 #### Windows (non-WSL)
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/acunniffe/git-ai/main/install.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com/install.ps1 | iex"
 ```
 
 🎊 That's it! **No per-repo setup.** Once installed Git AI will work OOTB with any of these **Supported Agents**:
