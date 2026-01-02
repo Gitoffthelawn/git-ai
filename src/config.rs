@@ -378,7 +378,7 @@ fn build_config() -> Config {
         .as_ref()
         .and_then(|c| c.api_base_url.clone())
         .or_else(|| env::var("GIT_AI_API_BASE_URL").ok())
-        .unwrap_or_else(|| "https://usegitai.com".to_string());
+        .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string());
 
     // Get prompt_storage setting (defaults to "default")
     // Valid values: "default", "notes", "local"
@@ -644,7 +644,7 @@ mod tests {
             disable_auto_updates: false,
             update_channel: UpdateChannel::Latest,
             feature_flags: FeatureFlags::default(),
-            api_base_url: "https://usegitai.com".to_string(),
+            api_base_url: DEFAULT_API_BASE_URL.to_string(),
             prompt_storage: "default".to_string(),
         }
     }
@@ -747,7 +747,7 @@ mod tests {
             disable_auto_updates: false,
             update_channel: UpdateChannel::Latest,
             feature_flags: FeatureFlags::default(),
-            api_base_url: "https://usegitai.com".to_string(),
+            api_base_url: DEFAULT_API_BASE_URL.to_string(),
             prompt_storage: "default".to_string(),
         }
     }

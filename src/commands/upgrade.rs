@@ -17,8 +17,8 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const UPDATE_CHECK_INTERVAL_HOURS: u64 = 24;
 const INSTALL_SCRIPT_URL: &str = "https://usegitai.com/install.sh";
 #[cfg(windows)]
-const INSTALL_SCRIPT_PS1_URL: &str = "https://usegitai.com/install.ps1";
-const RELEASES_API_URL: &str = "https://usegitai.com/api/releases";
+const INSTALL_SCRIPT_PS1_URL: &str =
+    "https://raw.githubusercontent.com/acunniffe/git-ai/main/install.ps1";
 const GIT_AI_RELEASE_ENV: &str = "GIT_AI_RELEASE_TAG";
 const BACKGROUND_SPAWN_THROTTLE_SECS: u64 = 60;
 
@@ -166,13 +166,12 @@ fn persist_update_state(channel: UpdateChannel, release: Option<&ChannelRelease>
     write_update_cache(&cache);
 }
 
-fn releases_endpoint(base: Option<&str>) -> String {
-    base.map(|b| format!("{}/releases", b.trim_end_matches('/')))
-        .unwrap_or_else(|| RELEASES_API_URL.to_string())
+fn releases_endpoint(base: &str) -> String {
+    format!("{}/api/releases", base.trim_end_matches('/'))
 }
 
 fn fetch_release_for_channel(
-    api_base_url: Option<&str>,
+    api_base_url: &str,
     channel: UpdateChannel,
 ) -> Result<ChannelRelease, String> {
     #[cfg(test)]
@@ -221,10 +220,9 @@ fn release_from_response(
 
 #[cfg(test)]
 fn try_mock_releases(
-    api_base_url: Option<&str>,
+    base: &str,
     channel: UpdateChannel,
 ) -> Option<Result<ChannelRelease, String>> {
-    let base = api_base_url?;
     let json = base.strip_prefix("mock://")?;
     Some(
         serde_json::from_str::<ReleasesResponse>(json)
@@ -362,12 +360,12 @@ fn run_impl(force: bool, background: bool) {
     let config = config::Config::get();
     let channel = config.update_channel();
     let skip_install = background && config.auto_updates_disabled();
-    let _ = run_impl_with_url(force, None, channel, skip_install);
+    let _ = run_impl_with_url(force, config.api_base_url(), channel, skip_install);
 }
 
 fn run_impl_with_url(
     force: bool,
-    api_base_url: Option<&str>,
+    api_base_url: &str,
     channel: UpdateChannel,
     skip_install: bool,
 ) -> UpgradeAction {
@@ -435,7 +433,7 @@ fn run_impl_with_url(
     }
     println!();
 
-    if api_base_url.is_some() || skip_install {
+    if skip_install {
         return action;
     }
 
@@ -627,11 +625,11 @@ mod tests {
         // Newer version available - should upgrade
         let action = run_impl_with_url(
             false,
-            Some(&mock_url(
+            &mock_url(
                 r#"{"latest":"v999.0.0","next":"v999.0.0-next-deadbeef"}"#,
-            )),
+            ),
             UpdateChannel::Latest,
-            false,
+            true,
         );
         assert_eq!(action, UpgradeAction::UpgradeAvailable);
 
@@ -642,40 +640,40 @@ mod tests {
         );
         let action = run_impl_with_url(
             false,
-            Some(&mock_url(&same_version_payload)),
+            &mock_url(&same_version_payload),
             UpdateChannel::Latest,
-            false,
+            true,
         );
         assert_eq!(action, UpgradeAction::AlreadyLatest);
 
         // Same version with --force - force reinstall
         let action = run_impl_with_url(
             true,
-            Some(&mock_url(&same_version_payload)),
+            &mock_url(&same_version_payload),
             UpdateChannel::Latest,
-            false,
+            true,
         );
         assert_eq!(action, UpgradeAction::ForceReinstall);
 
         // Older version without --force - running newer version
         let action = run_impl_with_url(
             false,
-            Some(&mock_url(
+            &mock_url(
                 r#"{"latest":"v1.0.9","next":"v1.0.9-next-deadbeef"}"#,
-            )),
+            ),
             UpdateChannel::Latest,
-            false,
+            true,
         );
         assert_eq!(action, UpgradeAction::RunningNewerVersion);
 
         // Older version with --force - force reinstall
         let action = run_impl_with_url(
             true,
-            Some(&mock_url(
+            &mock_url(
                 r#"{"latest":"v1.0.9","next":"v1.0.9-next-deadbeef"}"#,
-            )),
+            ),
             UpdateChannel::Latest,
-            false,
+            true,
         );
         assert_eq!(action, UpgradeAction::ForceReinstall);
 
