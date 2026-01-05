@@ -1,5 +1,6 @@
 use crate::ci::ci_context::{CiContext, CiEvent};
 use crate::ci::github::{get_github_ci_context, install_github_ci_workflow};
+use crate::ci::gitlab::{get_gitlab_ci_context, print_gitlab_ci_yaml};
 use crate::git::repository::find_repository_in_path;
 use crate::utils::debug_log;
 
@@ -11,6 +12,9 @@ pub fn handle_ci(args: &[String]) {
     match args[0].as_str() {
         "github" => {
             handle_ci_github(&args[1..]);
+        }
+        "gitlab" => {
+            handle_ci_gitlab(&args[1..]);
         }
         "local" => {
             handle_ci_local(&args[1..]);
@@ -71,6 +75,54 @@ fn handle_ci_github(args: &[String]) {
         },
         other => {
             eprintln!("Unknown ci github subcommand: {}", other);
+            print_ci_help_and_exit();
+        }
+    }
+}
+
+fn handle_ci_gitlab(args: &[String]) {
+    if args.is_empty() {
+        print_ci_gitlab_help_and_exit();
+    }
+    // Subcommands: install | run
+    match args[0].as_str() {
+        "run" => {
+            let no_cleanup = args[1..].iter().any(|a| a == "--no-cleanup");
+            let ci_context = get_gitlab_ci_context();
+            match ci_context {
+                Ok(Some(ci_context)) => {
+                    debug_log(&format!("GitLab CI context: {:?}", ci_context));
+                    if let Err(e) = ci_context.run() {
+                        eprintln!("Error running GitLab CI context: {}", e);
+                        std::process::exit(1);
+                    }
+                    if !no_cleanup {
+                        if let Err(e) = ci_context.teardown() {
+                            eprintln!("Error tearing down GitLab CI context: {}", e);
+                            std::process::exit(1);
+                        }
+                        debug_log("GitLab CI context teared down");
+                    } else {
+                        debug_log("Skipping teardown (--no-cleanup)");
+                    }
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("Failed to get GitLab CI context: {}", e);
+                    std::process::exit(1);
+                }
+                Ok(None) => {
+                    // No matching MR found - this is not an error, just nothing to do
+                    std::process::exit(0);
+                }
+            }
+        }
+        "install" => {
+            print_gitlab_ci_yaml();
+            std::process::exit(0);
+        }
+        other => {
+            eprintln!("Unknown ci gitlab subcommand: {}", other);
             print_ci_help_and_exit();
         }
     }
@@ -192,6 +244,9 @@ fn print_ci_help_and_exit() -> ! {
     eprintln!("  github           GitHub CI");
     eprintln!("    run [--no-cleanup]  Run GitHub CI in current repo");
     eprintln!("    install        Install/update workflow in current repo");
+    eprintln!("  gitlab           GitLab CI");
+    eprintln!("    run [--no-cleanup]  Run GitLab CI in current repo");
+    eprintln!("    install        Print YAML snippet to add to .gitlab-ci.yml");
     eprintln!("  local            Run CI locally by event name and flags");
     eprintln!("                   Usage: git-ai ci local <event> [flags]");
     eprintln!("                   Events:");
@@ -222,5 +277,17 @@ fn print_ci_github_help_and_exit() -> ! {
     eprintln!("  run [--no-cleanup]   Run GitHub CI in current repo");
     eprintln!("                       --no-cleanup  Skip teardown after run");
     eprintln!("  install              Install/update workflow in current repo");
+    std::process::exit(1);
+}
+
+fn print_ci_gitlab_help_and_exit() -> ! {
+    eprintln!("git-ai ci gitlab - GitLab CI utilities");
+    eprintln!("");
+    eprintln!("Usage: git-ai ci gitlab <subcommand> [args...]");
+    eprintln!("");
+    eprintln!("Subcommands:");
+    eprintln!("  run [--no-cleanup]   Run GitLab CI in current repo");
+    eprintln!("                       --no-cleanup  Skip teardown after run");
+    eprintln!("  install              Print YAML snippet to add to .gitlab-ci.yml");
     std::process::exit(1);
 }
