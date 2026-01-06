@@ -178,62 +178,76 @@ pub fn get_gitlab_ci_context() -> Result<Option<CiContext>, GitAiError> {
     let clone_dir = "git-ai-ci-clone".to_string();
     let clone_url = format!("{}/{}.git", server_url, project_path);
 
-    // Authenticate the clone URL with CI_JOB_TOKEN or GITLAB_TOKEN
-    let authenticated_url = if let Ok(job_token) = std::env::var("CI_JOB_TOKEN") {
-        // Use gitlab-ci-token for job tokens
+    // Build authenticated URLs:
+    // - clone_auth_url: Use CI_JOB_TOKEN for clone/fetch (read-only is fine)
+    // - push_auth_url: Use GITLAB_TOKEN for push (needs write_repository scope)
+    let scheme = if server_url.starts_with("https") {
+        "https"
+    } else {
+        "http"
+    };
+    let server_host = server_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+
+    // Clone URL uses CI_JOB_TOKEN (available by default, read-only)
+    let clone_auth_url = if let Ok(job_token) = std::env::var("CI_JOB_TOKEN") {
+        println!("[GitLab CI] Using CI_JOB_TOKEN for clone/fetch");
         clone_url.replace(
             &server_url,
-            &format!(
-                "{}://gitlab-ci-token:{}@{}",
-                if server_url.starts_with("https") {
-                    "https"
-                } else {
-                    "http"
-                },
-                job_token,
-                server_url
-                    .trim_start_matches("https://")
-                    .trim_start_matches("http://")
-            ),
-        )
-    } else if let Ok(gitlab_token) = std::env::var("GITLAB_TOKEN") {
-        // Use oauth2 for personal access tokens
-        clone_url.replace(
-            &server_url,
-            &format!(
-                "{}://oauth2:{}@{}",
-                if server_url.starts_with("https") {
-                    "https"
-                } else {
-                    "http"
-                },
-                gitlab_token,
-                server_url
-                    .trim_start_matches("https://")
-                    .trim_start_matches("http://")
-            ),
+            &format!("{}://gitlab-ci-token:{}@{}", scheme, job_token, server_host),
         )
     } else {
-        clone_url
+        println!("[GitLab CI] Warning: CI_JOB_TOKEN not available, clone may fail");
+        clone_url.clone()
     };
 
-    // Clone the repo
+    // Push URL uses GITLAB_TOKEN (needs write_repository scope)
+    let push_auth_url = if let Ok(gitlab_token) = std::env::var("GITLAB_TOKEN") {
+        println!("[GitLab CI] Using GITLAB_TOKEN for push (write_repository scope)");
+        clone_url.replace(
+            &server_url,
+            &format!("{}://oauth2:{}@{}", scheme, gitlab_token, server_host),
+        )
+    } else {
+        println!("[GitLab CI] Warning: GITLAB_TOKEN not set - push will likely fail");
+        println!("[GitLab CI] Create a Project Access Token with write_repository scope");
+        clone_auth_url.clone()
+    };
+
+    // Clone the repo using CI_JOB_TOKEN
+    println!("[GitLab CI] Cloning repository...");
     exec_git(&[
         "clone".to_string(),
         "--branch".to_string(),
         mr.target_branch.clone(),
-        authenticated_url.clone(),
+        clone_auth_url.clone(),
         clone_dir.clone(),
+    ])?;
+
+    // Set origin URL to GITLAB_TOKEN URL for push
+    println!("[GitLab CI] Setting origin URL for push...");
+    exec_git(&[
+        "-C".to_string(),
+        clone_dir.clone(),
+        "remote".to_string(),
+        "set-url".to_string(),
+        "origin".to_string(),
+        push_auth_url,
     ])?;
 
     // Fetch MR commits using GitLab's special MR refs
     // This is necessary because the MR branch may be deleted after merge
     // but GitLab keeps the commits accessible via refs/merge-requests/{iid}/head
+    println!(
+        "[GitLab CI] Fetching MR commits from refs/merge-requests/{}/head...",
+        mr.iid
+    );
     exec_git(&[
         "-C".to_string(),
         clone_dir.clone(),
         "fetch".to_string(),
-        authenticated_url.clone(),
+        clone_auth_url,
         format!(
             "refs/merge-requests/{}/head:refs/gitlab/mr/{}",
             mr.iid, mr.iid
@@ -262,8 +276,7 @@ pub fn get_gitlab_ci_context() -> Result<Option<CiContext>, GitAiError> {
 
 /// Print the GitLab CI YAML snippet to stdout for users to copy into their .gitlab-ci.yml
 pub fn print_gitlab_ci_yaml() {
-    println!("Add the following to your .gitlab-ci.yml:\n");
-    println!("---");
+    println!("Add the following to your .gitlab-ci.yml:");
+    println!();
     println!("{}", GITLAB_CI_TEMPLATE_YAML);
-    println!("---");
 }

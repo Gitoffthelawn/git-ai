@@ -1,5 +1,16 @@
 # Git AI - GitLab CI Configuration
 # Add this job to your .gitlab-ci.yml file
+#
+# SETUP: Create a GITLAB_TOKEN variable for pushing git notes.
+#
+# 1. Settings > Access tokens > Add new token
+#    - Name: git-ai
+#    - Role: Maintainer
+#    - Scope: write_repository (only scope needed)
+# 2. Settings > CI/CD > Variables > Add variable
+#    - Key: GITLAB_TOKEN
+#    - Value: <paste token>
+#    - Masked: checked
 
 git-ai:
   stage: .pre
