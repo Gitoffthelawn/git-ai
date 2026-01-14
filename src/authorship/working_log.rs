@@ -1,4 +1,5 @@
 use crate::authorship::attribution_tracker::{Attribution, LineAttribution};
+use crate::authorship::authorship_log_serialization::GIT_AI_VERSION;
 use crate::authorship::transcript::AiTranscript;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -113,6 +114,8 @@ pub struct Checkpoint {
     pub line_stats: CheckpointLineStats,
     #[serde(default)]
     pub api_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_ai_version: Option<String>,
 }
 
 impl Checkpoint {
@@ -138,6 +141,7 @@ impl Checkpoint {
             agent_metadata: None,
             line_stats: CheckpointLineStats::default(),
             api_version: CHECKPOINT_API_VERSION.to_string(),
+            git_ai_version: Some(GIT_AI_VERSION.to_string()),
         }
     }
 }
