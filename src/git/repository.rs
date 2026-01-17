@@ -1070,6 +1070,28 @@ impl Repository {
         Ok(())
     }
 
+    /// Get the git version as a tuple (major, minor, patch).
+    /// Returns None if the version cannot be parsed.
+    pub fn git_version(&self) -> Option<(u32, u32, u32)> {
+        let args = vec!["--version".to_string()];
+        let output = exec_git(&args).ok()?;
+        let version_str = String::from_utf8(output.stdout).ok()?;
+        parse_git_version(&version_str)
+    }
+
+    /// Check if the current git version supports --ignore-revs-file flag for blame.
+    /// This flag was added in git 2.23.0.
+    pub fn git_supports_ignore_revs_file(&self) -> bool {
+        if let Some((major, minor, _)) = self.git_version() {
+            // --ignore-revs-file was added in git 2.23.0
+            major > 2 || (major == 2 && minor >= 23)
+        } else {
+            // If we can't determine the version, assume it's supported
+            // to avoid breaking existing functionality
+            true
+        }
+    }
+
     // Write an in-memory buffer to the ODB as a blob.
     // The Oid returned can in turn be passed to find_blob to get a handle to the blob.
     #[allow(dead_code)]
@@ -1989,6 +2011,32 @@ pub fn exec_git_stdin_with_env(
     Ok(output)
 }
 
+/// Parse git version string (e.g., "git version 2.39.3 (Apple Git-146)") to extract major, minor, patch.
+/// Returns None if the version cannot be parsed.
+fn parse_git_version(version_str: &str) -> Option<(u32, u32, u32)> {
+    // Expected format: "git version X.Y.Z" or "git version X.Y.Z.windows.N" etc.
+    let version_str = version_str.trim();
+    let parts: Vec<&str> = version_str.split_whitespace().collect();
+
+    // Find the version number part (usually the 3rd element)
+    let version_part = parts.get(2)?;
+
+    // Parse version like "2.39.3" or "2.39.3.windows.1"
+    let version_nums: Vec<&str> = version_part.split('.').collect();
+    if version_nums.len() < 2 {
+        return None;
+    }
+
+    let major = version_nums.first()?.parse::<u32>().ok()?;
+    let minor = version_nums.get(1)?.parse::<u32>().ok()?;
+    let patch = version_nums
+        .get(2)
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    Some((major, minor, patch))
+}
+
 /// Parse git diff output to extract added line numbers per file
 ///
 /// Parses unified diff format hunk headers like:
@@ -2141,4 +2189,71 @@ fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool)> {
     let is_pure_insertion = old_count == 0;
 
     Some((lines, is_pure_insertion))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_git_version_standard() {
+        // Standard git version format
+        assert_eq!(
+            parse_git_version("git version 2.39.3"),
+            Some((2, 39, 3))
+        );
+        assert_eq!(
+            parse_git_version("git version 2.23.0"),
+            Some((2, 23, 0))
+        );
+        assert_eq!(
+            parse_git_version("git version 1.8.5"),
+            Some((1, 8, 5))
+        );
+    }
+
+    #[test]
+    fn test_parse_git_version_apple_git() {
+        // macOS Apple Git format
+        assert_eq!(
+            parse_git_version("git version 2.39.3 (Apple Git-146)"),
+            Some((2, 39, 3))
+        );
+    }
+
+    #[test]
+    fn test_parse_git_version_windows() {
+        // Windows git format
+        assert_eq!(
+            parse_git_version("git version 2.42.0.windows.2"),
+            Some((2, 42, 0))
+        );
+    }
+
+    #[test]
+    fn test_parse_git_version_no_patch() {
+        // Version without patch number
+        assert_eq!(
+            parse_git_version("git version 2.39"),
+            Some((2, 39, 0))
+        );
+    }
+
+    #[test]
+    fn test_parse_git_version_with_newline() {
+        // Version string with trailing newline
+        assert_eq!(
+            parse_git_version("git version 2.39.3\n"),
+            Some((2, 39, 3))
+        );
+    }
+
+    #[test]
+    fn test_parse_git_version_invalid() {
+        // Invalid formats should return None
+        assert_eq!(parse_git_version(""), None);
+        assert_eq!(parse_git_version("not a version"), None);
+        assert_eq!(parse_git_version("git version"), None);
+        assert_eq!(parse_git_version("git version x.y.z"), None);
+    }
 }

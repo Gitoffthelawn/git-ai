@@ -89,6 +89,8 @@ pub struct GitAiBlameOptions {
     // Ignore options
     pub ignore_revs: Vec<String>,
     pub ignore_revs_file: Option<String>,
+    /// Disable auto-detection of .git-blame-ignore-revs file
+    pub no_ignore_revs_file: bool,
 
     // Color options
     pub color_lines: bool,
@@ -159,6 +161,7 @@ impl Default for GitAiBlameOptions {
             move_threshold: None,
             ignore_revs: Vec::new(),
             ignore_revs_file: None,
+            no_ignore_revs_file: false,
             color_lines: false,
             color_by_age: false,
             progress: false,
@@ -1523,6 +1526,11 @@ pub fn parse_blame_args(args: &[String]) -> Result<(String, GitAiBlameOptions), 
                 }
                 options.ignore_revs_file = Some(args[i + 1].clone());
                 i += 2;
+            }
+            "--no-ignore-revs-file" => {
+                // Disable auto-detection of .git-blame-ignore-revs file
+                options.no_ignore_revs_file = true;
+                i += 1;
             }
 
             // Color options

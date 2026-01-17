@@ -535,13 +535,47 @@ fn handle_ai_blame(args: &[String]) {
     };
 
     // Parse blame arguments
-    let (file_path, options) = match commands::blame::parse_blame_args(args) {
+    let (file_path, mut options) = match commands::blame::parse_blame_args(args) {
         Ok(result) => result,
         Err(e) => {
             eprintln!("Failed to parse blame arguments: {}", e);
             std::process::exit(1);
         }
     };
+
+    // Auto-detect ignore-revs-file if not explicitly provided, not disabled via --no-ignore-revs-file,
+    // and git version supports --ignore-revs-file (git >= 2.23)
+    if options.ignore_revs_file.is_none()
+        && !options.no_ignore_revs_file
+        && repo.git_supports_ignore_revs_file()
+    {
+        // First, check git config for blame.ignoreRevsFile
+        if let Ok(Some(config_path)) = repo.config_get_str("blame.ignoreRevsFile") {
+            if !config_path.is_empty() {
+                // Config path could be relative to repo root or absolute
+                if let Ok(workdir) = repo.workdir() {
+                    let full_path = if std::path::Path::new(&config_path).is_absolute() {
+                        std::path::PathBuf::from(&config_path)
+                    } else {
+                        workdir.join(&config_path)
+                    };
+                    if full_path.exists() {
+                        options.ignore_revs_file = Some(full_path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+
+        // If still not set, check for .git-blame-ignore-revs in the repository root
+        if options.ignore_revs_file.is_none() {
+            if let Ok(workdir) = repo.workdir() {
+                let ignore_revs_path = workdir.join(".git-blame-ignore-revs");
+                if ignore_revs_path.exists() {
+                    options.ignore_revs_file = Some(ignore_revs_path.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
 
     // Check if this is an interactive terminal
     let is_interactive = std::io::stdout().is_terminal();
