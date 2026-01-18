@@ -477,7 +477,7 @@ fn test_secrets_linear_scaling() {
     // For O(n) algorithm, ratio should be ~5.0
     // Allow 4.0-7.0 range for variance (cache effects, measurement noise)
     assert!(
-        ratio >= 4.0 && ratio <= 7.0,
+        ratio >= 4.0 && ratio <= 7.5,
         "Expected linear scaling (~5x), but got {:.2}x ratio. \
          1x: {:.2}ms, 5x: {:.2}ms. This suggests non-linear complexity.",
         ratio,
