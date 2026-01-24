@@ -85,7 +85,6 @@ The format of the notes is outlined here in the [Git AI Standard v3.0.0](https:/
 | Sourcegraph Cody + Amp                                                                     |            |         |
 | Google Antigravity                                                                         |            |         |
 
-| _your agent here_                                                                          |            |         |
 
 > **Building a Coding Agent?** [Add support for Git AI by following this guide](https://usegitai.com/docs/cli/add-your-agent)
 
