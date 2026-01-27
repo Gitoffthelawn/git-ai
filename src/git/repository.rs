@@ -1018,9 +1018,19 @@ impl Repository {
         Ok(remotes)
     }
 
+    /// Get the git config file for this repository and fallback to global config if not found.
+    fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
+        match gix_config::File::from_git_dir(self.path().to_path_buf()) {
+            Ok(git_config_file) => Ok(git_config_file),
+            Err(e) => match gix_config::File::from_globals() {
+                Ok(system_config) => Ok(system_config),
+                Err(_) => Err(GitAiError::GixError(e.to_string())),
+            },
+        }
+    }
     /// Get config value for a given key as a String.
     pub fn config_get_str(&self, key: &str) -> Result<Option<String>, GitAiError> {
-        match gix_config::File::from_git_dir(self.path().to_path_buf()) {
+        match self.get_git_config_file() {
             Ok(git_config_file) => Ok(git_config_file.string(key).map(|cow| cow.to_string())),
             Err(e) => Err(GitAiError::GixError(e.to_string())),
         }
@@ -1032,7 +1042,7 @@ impl Repository {
         &self,
         pattern: &str,
     ) -> Result<std::collections::HashMap<String, String>, GitAiError> {
-        match gix_config::File::from_git_dir(self.path().to_path_buf()) {
+        match self.get_git_config_file() {
             Ok(git_config_file) => {
                 let mut matches: HashMap<String, String> = HashMap::new();
 
