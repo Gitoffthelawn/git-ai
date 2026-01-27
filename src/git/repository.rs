@@ -1,4 +1,3 @@
-use gix_config::parse::section::header;
 use regex::Regex;
 
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
