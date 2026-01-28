@@ -2,7 +2,8 @@ use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::transcript::AiTranscript;
 use crate::commands::checkpoint_agent::agent_presets::{
-    ClaudePreset, ContinueCliPreset, CursorPreset, GeminiPreset, GithubCopilotPreset,
+    ClaudePreset, ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset,
+    GithubCopilotPreset,
 };
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
@@ -171,6 +172,7 @@ pub fn update_prompt_from_tool(
         "gemini" => update_gemini_prompt(agent_metadata, current_model),
         "github-copilot" => update_github_copilot_prompt(agent_metadata, current_model),
         "continue-cli" => update_continue_cli_prompt(agent_metadata, current_model),
+        "droid" => update_droid_prompt(agent_metadata, current_model),
         _ => {
             debug_log(&format!("Unknown tool: {}", tool));
             PromptUpdateResult::Unchanged
@@ -389,6 +391,61 @@ fn update_continue_cli_prompt(
                     PromptUpdateResult::Failed(e)
                 }
             }
+        } else {
+            // No transcript_path in metadata
+            PromptUpdateResult::Unchanged
+        }
+    } else {
+        // No agent_metadata available
+        PromptUpdateResult::Unchanged
+    }
+}
+
+/// Update Droid prompt from transcript and settings files
+fn update_droid_prompt(
+    metadata: Option<&HashMap<String, String>>,
+    current_model: &str,
+) -> PromptUpdateResult {
+    if let Some(metadata) = metadata {
+        if let Some(transcript_path) = metadata.get("transcript_path") {
+            // Re-parse transcript
+            let transcript =
+                match DroidPreset::transcript_and_model_from_droid_jsonl(transcript_path) {
+                    Ok((transcript, _model)) => transcript,
+                    Err(e) => {
+                        debug_log(&format!(
+                            "Failed to parse Droid JSONL transcript from {}: {}",
+                            transcript_path, e
+                        ));
+                        log_error(
+                            &e,
+                            Some(serde_json::json!({
+                                "agent_tool": "droid",
+                                "operation": "transcript_and_model_from_droid_jsonl"
+                            })),
+                        );
+                        return PromptUpdateResult::Failed(e);
+                    }
+                };
+
+            // Re-parse model from settings.json
+            let model = if let Some(settings_path) = metadata.get("settings_path") {
+                match DroidPreset::model_from_droid_settings_json(settings_path) {
+                    Ok(Some(m)) => m,
+                    Ok(None) => current_model.to_string(),
+                    Err(e) => {
+                        debug_log(&format!(
+                            "Failed to parse Droid settings.json from {}: {}",
+                            settings_path, e
+                        ));
+                        current_model.to_string()
+                    }
+                }
+            } else {
+                current_model.to_string()
+            };
+
+            PromptUpdateResult::Updated(transcript, model)
         } else {
             // No transcript_path in metadata
             PromptUpdateResult::Unchanged

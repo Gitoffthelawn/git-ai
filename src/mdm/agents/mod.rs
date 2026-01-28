@@ -1,11 +1,13 @@
 mod claude_code;
 mod cursor;
+mod droid;
 mod gemini;
 mod opencode;
 mod vscode;
 
 pub use claude_code::ClaudeCodeInstaller;
 pub use cursor::CursorInstaller;
+pub use droid::DroidInstaller;
 pub use gemini::GeminiInstaller;
 pub use opencode::OpenCodeInstaller;
 pub use vscode::VSCodeInstaller;
@@ -20,5 +22,6 @@ pub fn get_all_installers() -> Vec<Box<dyn HookInstaller>> {
         Box::new(VSCodeInstaller),
         Box::new(OpenCodeInstaller),
         Box::new(GeminiInstaller),
+        Box::new(DroidInstaller),
     ]
 }
