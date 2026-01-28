@@ -182,9 +182,12 @@ impl PromptDbRecord {
             }
         }
 
-        // Fallback: if no user message, try first assistant message
+        // Fallback: if no user message, try first AI message
         for message in &self.messages.messages {
-            if let Message::Assistant { text, .. } = message {
+            if let Message::Assistant { text, .. }
+            | Message::Thinking { text, .. }
+            | Message::Plan { text, .. } = message
+            {
                 if text.len() <= max_length {
                     return text.clone();
                 } else {

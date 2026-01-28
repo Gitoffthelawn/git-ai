@@ -37,6 +37,8 @@ fn test_parse_example_claude_code_jsonl_with_model() {
             Message::ToolUse { name, input, .. } => {
                 println!("{}: ToolUse: {} with input: {:?}", i, name, input)
             }
+            Message::Thinking { text, .. } => println!("{}: Thinking: {}", i, text),
+            Message::Plan { text, .. } => println!("{}: Plan: {}", i, text),
         }
     }
 }
@@ -206,6 +208,20 @@ fn test_parse_claude_code_jsonl_with_thinking() {
             }
             Message::ToolUse { name, input, .. } => {
                 println!("{}: ToolUse: {} with input: {:?}", i, name, input)
+            }
+            Message::Thinking { text, .. } => {
+                println!(
+                    "{}: Thinking: {}",
+                    i,
+                    text.chars().take(100).collect::<String>()
+                )
+            }
+            Message::Plan { text, .. } => {
+                println!(
+                    "{}: Plan: {}",
+                    i,
+                    text.chars().take(100).collect::<String>()
+                )
             }
         }
     }

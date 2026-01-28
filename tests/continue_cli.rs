@@ -31,6 +31,8 @@ fn test_parse_example_continue_cli_json() {
             Message::ToolUse { name, input, .. } => {
                 println!("{}: ToolUse: {} with input: {:?}", i, name, input)
             }
+            Message::Thinking { text, .. } => println!("{}: Thinking: {}", i, text),
+            Message::Plan { text, .. } => println!("{}: Plan: {}", i, text),
         }
     }
 }

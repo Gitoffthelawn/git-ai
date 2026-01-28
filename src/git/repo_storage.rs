@@ -312,23 +312,58 @@ impl PersistedWorkingLog {
 
     /* append checkpoint */
     pub fn append_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), GitAiError> {
-        let checkpoints_file = self.dir.join("checkpoints.jsonl");
+        // Read existing checkpoints
+        let mut checkpoints = self.read_all_checkpoints().unwrap_or_default();
 
-        // Serialize checkpoint to JSON and append to JSONL file
-        let json_line = serde_json::to_string(checkpoint)?;
+        // Create a copy, potentially without transcript to reduce storage size.
+        // Transcripts are refetched in update_prompts_to_latest() before post-commit
+        // using tool-specific sources (transcript_path for Claude, cursor_db_path for Cursor, etc.)
+        //
+        // Tools that DON'T support refetch (transcript must be kept):
+        // - "opencode" - uses agent-v1 format, transcript provided inline
+        // - "mock_ai" - test preset, transcript not stored externally
+        // - Any other agent-v1 custom tools (detected by lack of tool-specific metadata)
+        let mut storage_checkpoint = checkpoint.clone();
+        let tool = checkpoint
+            .agent_id
+            .as_ref()
+            .map(|a| a.tool.as_str())
+            .unwrap_or("");
+        let metadata = &checkpoint.agent_metadata;
 
-        // Open file in append mode and write the JSON line
-        use std::fs::OpenOptions;
-        use std::io::Write;
+        // Blacklist: tools that cannot refetch transcripts
+        let cannot_refetch = match tool {
+            "opencode" | "mock_ai" => true,
+            // human checkpoints have no transcript anyway
+            "human" => false,
+            // For other tools, check if they have the necessary metadata for refetching
+            // cursor can always refetch from its database
+            "cursor" => false,
+            // claude, gemini, continue-cli need transcript_path
+            "claude" | "gemini" | "continue-cli" => {
+                metadata.as_ref().and_then(|m| m.get("transcript_path")).is_none()
+            }
+            // github-copilot needs chat_session_path
+            "github-copilot" => {
+                metadata.as_ref().and_then(|m| m.get("chat_session_path")).is_none()
+            }
+            // Unknown tools (like custom agent-v1 tools) can't refetch
+            _ => true,
+        };
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&checkpoints_file)?;
+        if !cannot_refetch {
+            storage_checkpoint.transcript = None;
+        }
 
-        writeln!(file, "{}", json_line)?;
+        // Add the new checkpoint
+        checkpoints.push(storage_checkpoint);
 
-        Ok(())
+        // Prune char-level attributions from older checkpoints for the same files
+        // Only the most recent checkpoint per file needs char-level precision
+        self.prune_old_char_attributions(&mut checkpoints);
+
+        // Write all checkpoints back
+        self.write_all_checkpoints(&checkpoints)
     }
 
     pub fn read_all_checkpoints(&self) -> Result<Vec<Checkpoint>, GitAiError> {
@@ -409,7 +444,38 @@ impl PersistedWorkingLog {
         Ok(migrated_checkpoints)
     }
 
+    /// Remove char-level attributions from all but the most recent checkpoint per file.
+    /// This reduces storage size while preserving precision for the entries that matter.
+    /// Only the most recent checkpoint entry for each file is used when computing new entries.
+    fn prune_old_char_attributions(&self, checkpoints: &mut [Checkpoint]) {
+        // Track which checkpoint index has the most recent entry for each file
+        // Iterate from newest to oldest
+        let mut newest_for_file: HashMap<String, usize> = HashMap::new();
+
+        for (checkpoint_idx, checkpoint) in checkpoints.iter().enumerate().rev() {
+            for entry in &checkpoint.entries {
+                newest_for_file
+                    .entry(entry.file.clone())
+                    .or_insert(checkpoint_idx);
+            }
+        }
+
+        // Clear attributions from entries that aren't the most recent for their file
+        for (checkpoint_idx, checkpoint) in checkpoints.iter_mut().enumerate() {
+            for entry in &mut checkpoint.entries {
+                if let Some(&newest_idx) = newest_for_file.get(&entry.file) {
+                    if checkpoint_idx != newest_idx {
+                        entry.attributions.clear();
+                    }
+                }
+            }
+        }
+    }
+
     /// Write all checkpoints to the JSONL file, replacing any existing content
+    /// Note: Unlike append_checkpoint(), this preserves transcripts because it's used
+    /// by post-commit after transcripts have been refetched and need to be preserved
+    /// for from_just_working_log() to read them.
     pub fn write_all_checkpoints(&self, checkpoints: &[Checkpoint]) -> Result<(), GitAiError> {
         let checkpoints_file = self.dir.join("checkpoints.jsonl");
 

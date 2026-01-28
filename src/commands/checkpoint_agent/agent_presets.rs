@@ -819,9 +819,21 @@ impl AgentCheckpointPreset for CursorPreset {
             model,
         };
 
+        // Store cursor database path in metadata for refetching during post-commit.
+        // This is only needed when GIT_AI_CURSOR_GLOBAL_DB_PATH env var is set (i.e., in tests),
+        // because the env var isn't passed to git hook subprocesses.
+        let agent_metadata = if std::env::var("GIT_AI_CURSOR_GLOBAL_DB_PATH").is_ok() {
+            Some(HashMap::from([(
+                "__test_cursor_db_path".to_string(),
+                global_db.to_string_lossy().to_string(),
+            )]))
+        } else {
+            None
+        };
+
         Ok(AgentRunResult {
             agent_id,
-            agent_metadata: None,
+            agent_metadata,
             checkpoint_kind: CheckpointKind::AiAgent,
             transcript: Some(transcript),
             repo_working_dir: Some(repo_working_dir),
@@ -867,17 +879,25 @@ impl CursorPreset {
         conversation_id: &str,
     ) -> Result<Option<(AiTranscript, String)>, GitAiError> {
         let global_db = Self::cursor_global_database_path()?;
-        if !global_db.exists() {
+        Self::fetch_cursor_conversation_from_db(&global_db, conversation_id)
+    }
+
+    /// Fetch a Cursor conversation from a specific database path
+    pub fn fetch_cursor_conversation_from_db(
+        db_path: &std::path::Path,
+        conversation_id: &str,
+    ) -> Result<Option<(AiTranscript, String)>, GitAiError> {
+        if !db_path.exists() {
             return Ok(None);
         }
 
         // Fetch composer payload
-        let composer_payload = Self::fetch_composer_payload(&global_db, conversation_id)?;
+        let composer_payload = Self::fetch_composer_payload(db_path, conversation_id)?;
 
         // Extract transcript and model
         let transcript_data = Self::transcript_data_from_composer_payload(
             &composer_payload,
-            &global_db,
+            db_path,
             conversation_id,
         )?;
 

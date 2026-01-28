@@ -40,6 +40,8 @@ fn test_parse_example_gemini_json_with_model() {
             Message::ToolUse { name, input, .. } => {
                 println!("{}: ToolUse: {} with input: {:?}", i, name, input)
             }
+            Message::Thinking { text, .. } => println!("{}: Thinking: {}", i, text),
+            Message::Plan { text, .. } => println!("{}: Plan: {}", i, text),
         }
     }
 }

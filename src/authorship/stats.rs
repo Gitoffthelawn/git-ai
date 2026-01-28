@@ -661,6 +661,14 @@ fn calculate_waiting_time(transcript: &crate::authorship::transcript::AiTranscri
             Message::Assistant {
                 timestamp: Some(ai_ts),
                 ..
+            }
+            | Message::Thinking {
+                timestamp: Some(ai_ts),
+                ..
+            }
+            | Message::Plan {
+                timestamp: Some(ai_ts),
+                ..
             },
         ) = (&messages[i], &messages[i + 1])
         {

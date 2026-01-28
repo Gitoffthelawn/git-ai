@@ -817,3 +817,97 @@ fn unknown_top_level_blocks_version_rewrite() {
     assert_eq!(got.command_args, s(&["--bogus", "--version"])); // no rewrite to `version`
     assert!(!got.is_help);
 }
+
+// =============================================================================
+// Regression tests: subcommand -v flags must NOT be treated as version requests
+// =============================================================================
+// These tests ensure that `-v` appearing AFTER a subcommand is passed through
+// as a command argument, not interpreted as a global version flag.
+// Regression test for: `git remote -v` incorrectly showing version info.
+
+#[test]
+fn remote_verbose_flag_not_treated_as_version() {
+    let args = s(&["remote", "-v"]);
+    let got = parse_git_cli_args(&args);
+    assert_eq!(got.command.as_deref(), Some("remote"));
+    assert_eq!(got.command_args, s(&["-v"]));
+    // Critically: command should NOT be "version"
+    assert_ne!(got.command.as_deref(), Some("version"));
+}
+
+#[test]
+fn remote_verbose_long_flag_not_treated_as_version() {
+    let args = s(&["remote", "--verbose"]);
+    let got = parse_git_cli_args(&args);
+    assert_eq!(got.command.as_deref(), Some("remote"));
+    assert_eq!(got.command_args, s(&["--verbose"]));
+}
+
+#[test]
+fn diff_verbose_flag_not_treated_as_version() {
+    let args = s(&["diff", "-v", "HEAD"]);
+    let got = parse_git_cli_args(&args);
+    assert_eq!(got.command.as_deref(), Some("diff"));
+    assert_eq!(got.command_args, s(&["-v", "HEAD"]));
+}
+
+#[test]
+fn log_verbose_flag_not_treated_as_version() {
+    let args = s(&["log", "-v", "--oneline"]);
+    let got = parse_git_cli_args(&args);
+    assert_eq!(got.command.as_deref(), Some("log"));
+    assert_eq!(got.command_args, s(&["-v", "--oneline"]));
+}
+
+#[test]
+fn global_option_then_command_with_verbose() {
+    // `git -C /tmp remote -v` should parse remote as command with -v as its arg
+    let args = s(&["-C", "/tmp", "remote", "-v"]);
+    let got = parse_git_cli_args(&args);
+    assert_eq!(got.global_args, s(&["-C", "/tmp"]));
+    assert_eq!(got.command.as_deref(), Some("remote"));
+    assert_eq!(got.command_args, s(&["-v"]));
+}
+
+#[test]
+fn multiple_global_options_then_command_with_verbose() {
+    // `git -c foo=bar -C /tmp remote -v`
+    let args = s(&["-c", "foo=bar", "-C", "/tmp", "remote", "-v"]);
+    let got = parse_git_cli_args(&args);
+    assert_eq!(got.global_args, s(&["-c", "foo=bar", "-C", "/tmp"]));
+    assert_eq!(got.command.as_deref(), Some("remote"));
+    assert_eq!(got.command_args, s(&["-v"]));
+}
+
+#[test]
+fn commit_verbose_flag_not_treated_as_version() {
+    // `git commit -v` shows diff in commit message editor
+    let args = s(&["commit", "-v"]);
+    let got = parse_git_cli_args(&args);
+    assert_eq!(got.command.as_deref(), Some("commit"));
+    assert_eq!(got.command_args, s(&["-v"]));
+}
+
+#[test]
+fn push_verbose_flag_not_treated_as_version() {
+    let args = s(&["push", "-v", "origin", "main"]);
+    let got = parse_git_cli_args(&args);
+    assert_eq!(got.command.as_deref(), Some("push"));
+    assert_eq!(got.command_args, s(&["-v", "origin", "main"]));
+}
+
+#[test]
+fn fetch_verbose_flag_not_treated_as_version() {
+    let args = s(&["fetch", "-v", "--all"]);
+    let got = parse_git_cli_args(&args);
+    assert_eq!(got.command.as_deref(), Some("fetch"));
+    assert_eq!(got.command_args, s(&["-v", "--all"]));
+}
+
+#[test]
+fn pull_verbose_flag_not_treated_as_version() {
+    let args = s(&["pull", "-v"]);
+    let got = parse_git_cli_args(&args);
+    assert_eq!(got.command.as_deref(), Some("pull"));
+    assert_eq!(got.command_args, s(&["-v"]));
+}

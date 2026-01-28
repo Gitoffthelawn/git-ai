@@ -495,6 +495,18 @@ fn format_messages_for_display(
                     Style::default().fg(Color::Green),
                 )));
             }
+            Message::Thinking { text, .. } => {
+                all_lines.push(Line::from(Span::styled(
+                    format!("Thinking: {}", text),
+                    Style::default().fg(Color::Magenta),
+                )));
+            }
+            Message::Plan { text, .. } => {
+                all_lines.push(Line::from(Span::styled(
+                    format!("Plan: {}", text),
+                    Style::default().fg(Color::Blue),
+                )));
+            }
             Message::ToolUse { name, .. } => {
                 all_lines.push(Line::from(Span::styled(
                     format!("Tool: {}", name),
@@ -562,4 +574,3 @@ fn render_preview_page(f: &mut Frame, state: &PromptPickerState) {
         .alignment(Alignment::Center);
     f.render_widget(footer, chunks[2]);
 }
-

@@ -479,7 +479,10 @@ pub fn redact_secrets_from_prompts(prompts: &mut BTreeMap<String, PromptRecord>)
     for record in prompts.values_mut() {
         for message in &mut record.messages {
             match message {
-                Message::User { text, .. } | Message::Assistant { text, .. } => {
+                Message::User { text, .. }
+                | Message::Assistant { text, .. }
+                | Message::Thinking { text, .. }
+                | Message::Plan { text, .. } => {
                     let (redacted, count) = redact_secrets_in_text(text);
                     *text = redacted;
                     total_redactions += count;

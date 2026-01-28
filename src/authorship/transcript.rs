@@ -15,6 +15,16 @@ pub enum Message {
         #[serde(skip_serializing_if = "Option::is_none")]
         timestamp: Option<String>,
     },
+    Thinking {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timestamp: Option<String>,
+    },
+    Plan {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timestamp: Option<String>,
+    },
     ToolUse {
         name: String,
         input: serde_json::Value,
@@ -34,6 +44,16 @@ impl Message {
         Message::Assistant { text, timestamp }
     }
 
+    /// Create a thinking message
+    pub fn thinking(text: String, timestamp: Option<String>) -> Self {
+        Message::Thinking { text, timestamp }
+    }
+
+    /// Create a plan message
+    pub fn plan(text: String, timestamp: Option<String>) -> Self {
+        Message::Plan { text, timestamp }
+    }
+
     /// Create a tool use message
     pub fn tool_use(name: String, input: serde_json::Value) -> Self {
         Message::ToolUse {
@@ -43,11 +63,14 @@ impl Message {
         }
     }
 
-    /// Get the text content if this is a user or assistant message
+    /// Get the text content if this is a user or AI text message
     #[allow(dead_code)]
     pub fn text(&self) -> Option<&String> {
         match self {
-            Message::User { text, .. } | Message::Assistant { text, .. } => Some(text),
+            Message::User { text, .. }
+            | Message::Assistant { text, .. }
+            | Message::Thinking { text, .. }
+            | Message::Plan { text, .. } => Some(text),
             Message::ToolUse { .. } => None,
         }
     }
@@ -63,6 +86,8 @@ impl Message {
         match self {
             Message::User { timestamp, .. }
             | Message::Assistant { timestamp, .. }
+            | Message::Thinking { timestamp, .. }
+            | Message::Plan { timestamp, .. }
             | Message::ToolUse { timestamp, .. } => timestamp.as_ref(),
         }
     }
