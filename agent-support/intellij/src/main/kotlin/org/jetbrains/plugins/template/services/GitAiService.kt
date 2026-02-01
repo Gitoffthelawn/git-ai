@@ -58,6 +58,26 @@ class GitAiService {
     }
 
     /**
+     * Builds a shell command that wraps the given arguments in a login shell.
+     * This ensures the user's PATH is inherited so git-ai can be found.
+     */
+    private fun buildShellCommand(vararg args: String): List<String> {
+        val command = args.joinToString(" ") { arg ->
+            if (arg.contains(" ") || arg.contains("\"")) {
+                "'" + arg.replace("'", "'\\''") + "'"
+            } else {
+                arg
+            }
+        }
+        return if (System.getProperty("os.name").lowercase().contains("win")) {
+            listOf("cmd", "/c", command)
+        } else {
+            // Use login shell to inherit user's PATH
+            listOf("/bin/sh", "-l", "-c", command)
+        }
+    }
+
+    /**
      * Checks if git-ai CLI is installed and meets the minimum version requirement.
      */
     fun checkAvailable(): Boolean {
@@ -78,7 +98,7 @@ class GitAiService {
 
     private fun checkGitAiInstalled(): Boolean {
         return try {
-            val process = ProcessBuilder("git-ai", "version")
+            val process = ProcessBuilder(buildShellCommand("git-ai", "version"))
                 .redirectErrorStream(true)
                 .start()
 
@@ -140,13 +160,9 @@ class GitAiService {
             logger.warn("Creating checkpoint (agent-v1): $inputType")
             logger.warn("Checkpoint input: $jsonInput")
 
-            val process = ProcessBuilder(
-                "git-ai",
-                "checkpoint",
-                "agent-v1",
-                "--hook-input",
-                "stdin"
-            )
+            val process = ProcessBuilder(buildShellCommand(
+                "git-ai", "checkpoint", "agent-v1", "--hook-input", "stdin"
+            ))
                 .directory(File(workingDirectory))
                 .redirectErrorStream(true)
                 .start()
