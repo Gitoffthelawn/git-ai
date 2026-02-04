@@ -365,4 +365,57 @@ mod tests {
             "日中韓.txt"
         );
     }
+
+    // =========================================================================
+    // Phase 2: RTL Scripts Tests (Arabic, Hebrew, Persian, Urdu)
+    // =========================================================================
+
+    #[test]
+    fn test_unescape_arabic() {
+        // Arabic "مرحبا" (marhaba = hello)
+        // م = \331\205, ر = \330\261, ح = \330\255, ب = \330\250, ا = \330\247
+        assert_eq!(
+            unescape_git_path("\"\\331\\205\\330\\261\\330\\255\\330\\250\\330\\247.txt\""),
+            "مرحبا.txt"
+        );
+    }
+
+    #[test]
+    fn test_unescape_hebrew() {
+        // Hebrew "שלום" (shalom = hello/peace)
+        // ש = \327\251, ל = \327\234, ו = \327\225, ם = \327\235
+        assert_eq!(
+            unescape_git_path("\"\\327\\251\\327\\234\\327\\225\\327\\235.txt\""),
+            "שלום.txt"
+        );
+    }
+
+    #[test]
+    fn test_unescape_persian() {
+        // Persian "فارسی" (farsi)
+        // ف = \331\201, ا = \330\247, ر = \330\261, س = \330\263, ی = \333\214
+        assert_eq!(
+            unescape_git_path("\"\\331\\201\\330\\247\\330\\261\\330\\263\\333\\214.txt\""),
+            "فارسی.txt"
+        );
+    }
+
+    #[test]
+    fn test_unescape_urdu() {
+        // Urdu "اردو" (urdu)
+        // ا = \330\247, ر = \330\261, د = \330\257, و = \331\210
+        assert_eq!(
+            unescape_git_path("\"\\330\\247\\330\\261\\330\\257\\331\\210.txt\""),
+            "اردو.txt"
+        );
+    }
+
+    #[test]
+    fn test_unescape_mixed_rtl_ltr() {
+        // Mixed RTL/LTR: "test_مرحبا_file" (ASCII + Arabic + ASCII)
+        assert_eq!(
+            unescape_git_path("\"test_\\331\\205\\330\\261\\330\\255\\330\\250\\330\\247_file.txt\""),
+            "test_مرحبا_file.txt"
+        );
+    }
 }
