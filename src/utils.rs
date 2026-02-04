@@ -644,4 +644,44 @@ mod tests {
             "✓.txt"
         );
     }
+
+    // =========================================================================
+    // Phase 8: Unicode Normalization Tests (NFC vs NFD)
+    // =========================================================================
+
+    #[test]
+    fn test_unescape_nfc_precomposed() {
+        // NFC precomposed: é (U+00E9) = \303\251
+        assert_eq!(
+            unescape_git_path("\"caf\\303\\251.txt\""),
+            "café.txt"
+        );
+    }
+
+    #[test]
+    fn test_unescape_nfd_decomposed() {
+        // NFD decomposed: e + combining acute (U+0065 + U+0301) = e + \314\201
+        assert_eq!(
+            unescape_git_path("\"cafe\\314\\201.txt\""),
+            "cafe\u{0301}.txt"
+        );
+    }
+
+    #[test]
+    fn test_unescape_combining_diaeresis() {
+        // Combining diaeresis: i + ̈ (U+0069 + U+0308) = i + \314\210
+        assert_eq!(
+            unescape_git_path("\"nai\\314\\210ve.txt\""),
+            "nai\u{0308}ve.txt"
+        );
+    }
+
+    #[test]
+    fn test_unescape_angstrom() {
+        // Å (A with ring above, U+00C5) = \303\205
+        assert_eq!(
+            unescape_git_path("\"\\303\\205ngstr\\303\\266m.txt\""),
+            "Ångström.txt"
+        );
+    }
 }
