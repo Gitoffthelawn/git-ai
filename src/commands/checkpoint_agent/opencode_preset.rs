@@ -376,7 +376,7 @@ impl OpenCodePreset {
 
         let mut messages = Vec::new();
 
-        let entries = std::fs::read_dir(&message_dir).map_err(|e| GitAiError::IoError(e))?;
+        let entries = std::fs::read_dir(&message_dir).map_err(GitAiError::IoError)?;
 
         for entry in entries {
             let entry = entry.map_err(GitAiError::IoError)?;
@@ -418,7 +418,7 @@ impl OpenCodePreset {
 
         let mut parts: Vec<(i64, OpenCodePart)> = Vec::new();
 
-        let entries = std::fs::read_dir(&part_dir).map_err(|e| GitAiError::IoError(e))?;
+        let entries = std::fs::read_dir(&part_dir).map_err(GitAiError::IoError)?;
 
         for entry in entries {
             let entry = entry.map_err(GitAiError::IoError)?;

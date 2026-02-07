@@ -1,7 +1,9 @@
 use super::ide_types::{DetectedIde, JETBRAINS_IDES, JetBrainsIde};
 use crate::mdm::utils::home_dir;
+#[cfg(target_os = "macos")]
 use crate::utils::debug_log;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 /// Find all installed JetBrains IDEs on the system
