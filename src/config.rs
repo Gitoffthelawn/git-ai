@@ -35,13 +35,17 @@ impl PromptStorageMode {
             PromptStorageMode::Local => "local",
         }
     }
+}
 
-    pub fn from_str(input: &str) -> Option<Self> {
+impl std::str::FromStr for PromptStorageMode {
+    type Err = String;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
         match input.trim().to_lowercase().as_str() {
-            "default" => Some(PromptStorageMode::Default),
-            "notes" => Some(PromptStorageMode::Notes),
-            "local" => Some(PromptStorageMode::Local),
-            _ => None,
+            "default" => Ok(PromptStorageMode::Default),
+            "notes" => Ok(PromptStorageMode::Notes),
+            "local" => Ok(PromptStorageMode::Local),
+            other => Err(format!("invalid prompt storage mode: '{}'", other)),
         }
     }
 }
@@ -319,7 +323,7 @@ impl Config {
 
         // Step 2: If no include list, use the global prompt_storage (legacy behavior)
         if self.include_prompts_in_repositories.is_empty() {
-            return PromptStorageMode::from_str(&self.prompt_storage)
+            return self.prompt_storage.parse::<PromptStorageMode>()
                 .unwrap_or(PromptStorageMode::Default);
         }
 
@@ -347,12 +351,12 @@ impl Config {
 
         if matches_include {
             // Step 3a: Repo is in include list → use primary prompt_storage
-            PromptStorageMode::from_str(&self.prompt_storage).unwrap_or(PromptStorageMode::Default)
+            self.prompt_storage.parse::<PromptStorageMode>().unwrap_or(PromptStorageMode::Default)
         } else {
             // Step 4: Repo not in include list → use fallback
             self.default_prompt_storage
                 .as_ref()
-                .and_then(|s| PromptStorageMode::from_str(s))
+                .and_then(|s| s.parse::<PromptStorageMode>().ok())
                 .unwrap_or(PromptStorageMode::Local) // Safe default
         }
     }
@@ -1216,31 +1220,31 @@ mod tests {
     #[test]
     fn test_prompt_storage_mode_from_str() {
         assert_eq!(
-            PromptStorageMode::from_str("default"),
+            "default".parse::<PromptStorageMode>().ok(),
             Some(PromptStorageMode::Default)
         );
         assert_eq!(
-            PromptStorageMode::from_str("DEFAULT"),
+            "DEFAULT".parse::<PromptStorageMode>().ok(),
             Some(PromptStorageMode::Default)
         );
         assert_eq!(
-            PromptStorageMode::from_str("notes"),
+            "notes".parse::<PromptStorageMode>().ok(),
             Some(PromptStorageMode::Notes)
         );
         assert_eq!(
-            PromptStorageMode::from_str("NOTES"),
+            "NOTES".parse::<PromptStorageMode>().ok(),
             Some(PromptStorageMode::Notes)
         );
         assert_eq!(
-            PromptStorageMode::from_str("local"),
+            "local".parse::<PromptStorageMode>().ok(),
             Some(PromptStorageMode::Local)
         );
         assert_eq!(
-            PromptStorageMode::from_str("LOCAL"),
+            "LOCAL".parse::<PromptStorageMode>().ok(),
             Some(PromptStorageMode::Local)
         );
-        assert_eq!(PromptStorageMode::from_str("invalid"), None);
-        assert_eq!(PromptStorageMode::from_str(""), None);
+        assert_eq!("invalid".parse::<PromptStorageMode>().ok(), None);
+        assert_eq!("".parse::<PromptStorageMode>().ok(), None);
     }
 
     #[test]
