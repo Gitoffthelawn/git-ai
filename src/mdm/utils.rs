@@ -953,8 +953,7 @@ mod tests {
     fn test_editor_cli_command_builds_command_with_args() {
         let cmd = EditorCliCommand::from_path("cursor");
         let built = cmd.command(&["--list-extensions"]);
-        // The program should be "cursor"
-        assert_eq!(format!("{:?}", built.get_program()), "\"cursor\"");
+        assert_eq!(built.get_program(), "cursor");
     }
 
     #[test]
@@ -964,8 +963,7 @@ mod tests {
         let cmd = EditorCliCommand::from_cli_js(&electron, &cli_js);
         let built = cmd.command(&["--version"]);
 
-        // The program should be the electron binary
-        assert_eq!(format!("{:?}", built.get_program()), "\"/usr/bin/electron\"");
+        assert_eq!(built.get_program(), "/usr/bin/electron");
         // Env should include ELECTRON_RUN_AS_NODE
         let envs: Vec<_> = built.get_envs().collect();
         assert!(envs.iter().any(|(k, v)| {
