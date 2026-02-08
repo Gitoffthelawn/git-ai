@@ -395,22 +395,28 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
             log_path_str, script_path_str, script_path_str
         );
 
-        let mut cmd = Command::new("powershell");
-        cmd.arg("-NoProfile")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass")
-            .arg("-Command")
-            .arg(&ps_wrapper)
-            .env(GIT_AI_RELEASE_ENV, tag);
+        let spawn_powershell = |exe: &str| -> std::io::Result<std::process::Child> {
+            let mut cmd = Command::new(exe);
+            cmd.arg("-NoProfile")
+                .arg("-ExecutionPolicy")
+                .arg("Bypass")
+                .arg("-Command")
+                .arg(&ps_wrapper)
+                .env(GIT_AI_RELEASE_ENV, tag);
 
-        // Hide the spawned console to prevent any host/UI bleed-through
-        cmd.creation_flags(CREATE_NO_WINDOW);
+            // Hide the spawned console to prevent any host/UI bleed-through
+            cmd.creation_flags(CREATE_NO_WINDOW);
 
-        if silent {
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        }
+            if silent {
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
 
-        match cmd.spawn() {
+            cmd.spawn()
+        };
+
+        let spawn_result = spawn_powershell("pwsh").or_else(|_| spawn_powershell("powershell"));
+
+        match spawn_result {
             Ok(_) => {
                 if !silent {
                     println!(
