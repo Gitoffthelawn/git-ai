@@ -74,7 +74,22 @@ function Verify-Checksum {
     }
 
     # Calculate actual checksum
-    $actual = (Get-FileHash -Path $File -Algorithm SHA256).Hash.ToLower()
+    $hashCommand = Get-Command Get-FileHash -ErrorAction SilentlyContinue
+    if ($null -ne $hashCommand) {
+        $actual = (Get-FileHash -Path $File -Algorithm SHA256).Hash.ToLower()
+    } else {
+        $stream = [System.IO.File]::OpenRead($File)
+        try {
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $hashBytes = $sha256.ComputeHash($stream)
+            $actual = ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLower()
+        } finally {
+            $stream.Dispose()
+            if ($sha256) {
+                $sha256.Dispose()
+            }
+        }
+    }
 
     if ($expected -ne $actual) {
         Remove-Item -Force -ErrorAction SilentlyContinue $File
