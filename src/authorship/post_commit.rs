@@ -13,6 +13,21 @@ use crate::utils::debug_log;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 
+/// Skip expensive post-commit stats when this threshold is exceeded.
+/// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
+const STATS_SKIP_MAX_HUNKS: usize = 1000;
+/// Skip expensive stats for very large net additions even if hunks are moderate.
+const STATS_SKIP_MAX_ADDED_LINES: usize = 6000;
+/// Skip expensive stats for extremely wide commits touching many added-line files.
+const STATS_SKIP_MAX_FILES_WITH_ADDITIONS: usize = 200;
+
+#[derive(Debug, Clone, Copy)]
+struct StatsCostEstimate {
+    files_with_additions: usize,
+    added_lines: usize,
+    hunk_ranges: usize,
+}
+
 pub fn post_commit(
     repo: &Repository,
     base_commit: Option<String>,
@@ -156,19 +171,38 @@ pub fn post_commit(
 
     notes_add(repo, &commit_sha, &authorship_json)?;
 
-    // Compute stats once (needed for both metrics and terminal output)
-    let stats = stats_for_commit_stats(repo, &commit_sha, &[])?;
+    // Compute stats once (needed for both metrics and terminal output), unless preflight
+    // estimate predicts this would be too expensive for the commit hook path.
+    let mut stats: Option<crate::authorship::stats::CommitStats> = None;
+    let skip_reason = estimate_stats_cost(repo, &parent_sha, &commit_sha)
+        .ok()
+        .and_then(|estimate| {
+            if should_skip_expensive_post_commit_stats(&estimate) {
+                Some(estimate)
+            } else {
+                None
+            }
+        });
 
-    // Record metrics for this commit
-    record_commit_metrics(
-        repo,
-        &commit_sha,
-        &parent_sha,
-        &human_author,
-        &authorship_log,
-        &stats,
-        &parent_working_log,
-    );
+    if skip_reason.is_none() {
+        let computed = stats_for_commit_stats(repo, &commit_sha, &[])?;
+        // Record metrics only when we have full stats.
+        record_commit_metrics(
+            repo,
+            &commit_sha,
+            &parent_sha,
+            &human_author,
+            &authorship_log,
+            &computed,
+            &parent_working_log,
+        );
+        stats = Some(computed);
+    } else if let Some(estimate) = skip_reason {
+        debug_log(&format!(
+            "Skipping expensive post-commit stats for {} (files_with_additions={}, added_lines={}, hunks={})",
+            commit_sha, estimate.files_with_additions, estimate.added_lines, estimate.hunk_ranges
+        ));
+    }
 
     // Write INITIAL file for uncommitted AI attributions (if any)
     if !initial_attributions.files.is_empty() {
@@ -183,9 +217,75 @@ pub fn post_commit(
     if !supress_output && !Config::get().is_quiet() {
         // Only print stats if we're in an interactive terminal and quiet mode is disabled
         let is_interactive = std::io::stdout().is_terminal();
-        write_stats_to_terminal(&stats, is_interactive);
+        if let Some(stats) = stats.as_ref() {
+            write_stats_to_terminal(stats, is_interactive);
+        } else if let Some(estimate) = skip_reason {
+            eprintln!(
+                "[git-ai] Skipped git-ai stats for large commit (files_with_additions={}, added_lines={}, hunks={}). Run `git-ai stats {}` to compute stats on demand.",
+                estimate.files_with_additions,
+                estimate.added_lines,
+                estimate.hunk_ranges,
+                commit_sha
+            );
+        }
     }
     Ok((commit_sha.to_string(), authorship_log))
+}
+
+fn should_skip_expensive_post_commit_stats(estimate: &StatsCostEstimate) -> bool {
+    estimate.hunk_ranges >= STATS_SKIP_MAX_HUNKS
+        || estimate.added_lines >= STATS_SKIP_MAX_ADDED_LINES
+        || estimate.files_with_additions >= STATS_SKIP_MAX_FILES_WITH_ADDITIONS
+}
+
+fn estimate_stats_cost(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+) -> Result<StatsCostEstimate, GitAiError> {
+    let added_lines_by_file = repo.diff_added_lines(parent_sha, commit_sha, None)?;
+
+    let files_with_additions = added_lines_by_file
+        .values()
+        .filter(|lines| !lines.is_empty())
+        .count();
+
+    let mut added_lines = 0usize;
+    let mut hunk_ranges = 0usize;
+
+    for (_file, lines) in added_lines_by_file {
+        if lines.is_empty() {
+            continue;
+        }
+        added_lines += lines.len();
+        hunk_ranges += count_line_ranges(&lines);
+    }
+
+    Ok(StatsCostEstimate {
+        files_with_additions,
+        added_lines,
+        hunk_ranges,
+    })
+}
+
+fn count_line_ranges(lines: &[u32]) -> usize {
+    if lines.is_empty() {
+        return 0;
+    }
+
+    let mut sorted = lines.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+
+    let mut ranges = 1usize;
+    let mut prev = sorted[0];
+    for &line in &sorted[1..] {
+        if line != prev + 1 {
+            ranges += 1;
+        }
+        prev = line;
+    }
+    ranges
 }
 
 /// Update prompts/transcripts in working log checkpoints to their latest versions.
@@ -467,7 +567,52 @@ fn record_commit_metrics(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        STATS_SKIP_MAX_ADDED_LINES, STATS_SKIP_MAX_FILES_WITH_ADDITIONS, STATS_SKIP_MAX_HUNKS,
+        StatsCostEstimate, count_line_ranges, should_skip_expensive_post_commit_stats,
+    };
     use crate::git::test_utils::TmpRepo;
+
+    #[test]
+    fn test_count_line_ranges_handles_scattered_and_contiguous_lines() {
+        assert_eq!(count_line_ranges(&[]), 0);
+        assert_eq!(count_line_ranges(&[1]), 1);
+        assert_eq!(count_line_ranges(&[1, 2, 3]), 1);
+        assert_eq!(count_line_ranges(&[1, 3, 5]), 3);
+        // Includes unsorted and duplicate values.
+        assert_eq!(count_line_ranges(&[5, 3, 3, 4, 10]), 2);
+    }
+
+    #[test]
+    fn test_should_skip_expensive_post_commit_stats_thresholds() {
+        let below_threshold = StatsCostEstimate {
+            files_with_additions: STATS_SKIP_MAX_FILES_WITH_ADDITIONS - 1,
+            added_lines: STATS_SKIP_MAX_ADDED_LINES - 1,
+            hunk_ranges: STATS_SKIP_MAX_HUNKS - 1,
+        };
+        assert!(!should_skip_expensive_post_commit_stats(&below_threshold));
+
+        let by_hunks = StatsCostEstimate {
+            files_with_additions: 1,
+            added_lines: 1,
+            hunk_ranges: STATS_SKIP_MAX_HUNKS,
+        };
+        assert!(should_skip_expensive_post_commit_stats(&by_hunks));
+
+        let by_added_lines = StatsCostEstimate {
+            files_with_additions: 1,
+            added_lines: STATS_SKIP_MAX_ADDED_LINES,
+            hunk_ranges: 1,
+        };
+        assert!(should_skip_expensive_post_commit_stats(&by_added_lines));
+
+        let by_files = StatsCostEstimate {
+            files_with_additions: STATS_SKIP_MAX_FILES_WITH_ADDITIONS,
+            added_lines: 1,
+            hunk_ranges: 1,
+        };
+        assert!(should_skip_expensive_post_commit_stats(&by_files));
+    }
 
     #[test]
     fn test_post_commit_empty_repo_with_checkpoint() {
