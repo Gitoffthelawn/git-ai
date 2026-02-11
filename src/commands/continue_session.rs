@@ -8,12 +8,12 @@ use crate::authorship::secrets::redact_secrets_from_prompts;
 use crate::authorship::transcript::Message;
 use crate::commands::prompt_picker;
 use crate::commands::search::{
-    search_by_commit, search_by_commit_range, search_by_file, search_by_pattern,
-    search_by_prompt_id, SearchResult,
+    SearchResult, search_by_commit, search_by_commit_range, search_by_file, search_by_pattern,
+    search_by_prompt_id,
 };
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
-use crate::git::repository::{exec_git, Repository};
+use crate::git::repository::{Repository, exec_git};
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::io::{BufRead, IsTerminal, Write};
@@ -180,9 +180,7 @@ fn read_project_context(repo: &Repository) -> Option<String> {
     if contents.len() > MAX_CONTEXT_BYTES {
         // Use floor_char_boundary to avoid panicking on multi-byte UTF-8
         let safe_limit = contents.floor_char_boundary(MAX_CONTEXT_BYTES);
-        let cut_point = contents[..safe_limit]
-            .rfind('\n')
-            .unwrap_or(safe_limit);
+        let cut_point = contents[..safe_limit].rfind('\n').unwrap_or(safe_limit);
         Some(format!(
             "{}\n\n[... CLAUDE.md truncated at 50KB ({} bytes total)]",
             &contents[..cut_point],
@@ -257,12 +255,8 @@ fn gather_session_context(
     options: &ContinueOptions,
 ) -> SessionContext {
     // 1. Collect commit SHAs from prompt_commits before moving prompts
-    let prompt_commit_shas: Vec<String> = result
-        .prompt_commits
-        .values()
-        .flatten()
-        .cloned()
-        .collect();
+    let prompt_commit_shas: Vec<String> =
+        result.prompt_commits.values().flatten().cloned().collect();
 
     // 2. Convert prompts to BTreeMap for ordered iteration
     let mut prompts: BTreeMap<String, PromptRecord> = result.prompts.into_iter().collect();
@@ -270,7 +264,10 @@ fn gather_session_context(
     // 3. Redact secrets
     let redaction_count = redact_secrets_from_prompts(&mut prompts);
     if redaction_count > 0 {
-        eprintln!("Redacted {} potential secret(s) from output", redaction_count);
+        eprintln!(
+            "Redacted {} potential secret(s) from output",
+            redaction_count
+        );
     }
 
     // 4. Collect commit diffs
@@ -403,31 +400,27 @@ fn handle_continue_tui(repo: &Repository) {
 
     // Execute the chosen action
     match choice {
-        AgentChoice::Launch(agent) => {
-            match launch_agent(&agent, &context, false) {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("Error launching agent: {}", e);
-                    eprintln!("Printing context to stdout instead:");
-                    println!("{}", context);
-                }
+        AgentChoice::Launch(agent) => match launch_agent(&agent, &context, false) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Error launching agent: {}", e);
+                eprintln!("Printing context to stdout instead:");
+                println!("{}", context);
             }
-        }
+        },
         AgentChoice::Stdout => {
             println!("{}", context);
         }
-        AgentChoice::Clipboard => {
-            match copy_to_clipboard(&context) {
-                Ok(()) => {
-                    eprintln!("Context copied to clipboard ({} characters)", context.len());
-                }
-                Err(e) => {
-                    eprintln!("Error copying to clipboard: {}", e);
-                    eprintln!("Printing context to stdout instead:");
-                    println!("{}", context);
-                }
+        AgentChoice::Clipboard => match copy_to_clipboard(&context) {
+            Ok(()) => {
+                eprintln!("Context copied to clipboard ({} characters)", context.len());
             }
-        }
+            Err(e) => {
+                eprintln!("Error copying to clipboard: {}", e);
+                eprintln!("Printing context to stdout instead:");
+                println!("{}", context);
+            }
+        },
     }
 }
 
@@ -541,10 +534,7 @@ pub fn handle_continue(args: &[String]) {
     if parsed.options.clipboard {
         match copy_to_clipboard(&output) {
             Ok(()) => {
-                eprintln!(
-                    "Context copied to clipboard ({} characters)",
-                    output.len()
-                );
+                eprintln!("Context copied to clipboard ({} characters)", output.len());
             }
             Err(e) => {
                 eprintln!("Error copying to clipboard: {}", e);
@@ -610,7 +600,10 @@ fn launch_agent(agent: &str, context: &str, summary: bool) -> Result<(), GitAiEr
             {
                 let err = cmd.exec();
                 // exec() only returns if it failed
-                Err(GitAiError::Generic(format!("Failed to exec claude: {}", err)))
+                Err(GitAiError::Generic(format!(
+                    "Failed to exec claude: {}",
+                    err
+                )))
             }
 
             #[cfg(not(unix))]
@@ -1108,11 +1101,12 @@ fn format_context_json(ctx: &SessionContext) -> String {
     let commit_diffs_json: serde_json::Value = if ctx.commit_diffs.is_empty() {
         json!(null)
     } else {
-        json!(ctx
-            .commit_diffs
-            .iter()
-            .map(|(sha, diff)| json!({"sha": sha, "diff": diff}))
-            .collect::<Vec<_>>())
+        json!(
+            ctx.commit_diffs
+                .iter()
+                .map(|(sha, diff)| json!({"sha": sha, "diff": diff}))
+                .collect::<Vec<_>>()
+        )
     };
 
     let output = json!({

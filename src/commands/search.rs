@@ -10,7 +10,7 @@ use crate::commands::blame::GitAiBlameOptions;
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
 use crate::git::refs::get_authorship;
-use crate::git::repository::{exec_git, Repository};
+use crate::git::repository::{Repository, exec_git};
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
@@ -184,8 +184,8 @@ pub fn search_by_file(
 
     // Configure blame options for data-only mode
     let options = GitAiBlameOptions {
-        json: true,             // Enable structured output mode
-        no_output: true,        // Suppress terminal output
+        json: true,                       // Enable structured output mode
+        no_output: true,                  // Suppress terminal output
         use_prompt_hashes_as_names: true, // Get prompt hashes instead of tool names
         newest_commit: Some("HEAD".to_string()),
         line_ranges: line_ranges.to_vec(),
@@ -279,7 +279,11 @@ pub fn search_by_pattern(query: &str) -> Result<SearchResult, GitAiError> {
 
         // Add commit SHA if available
         if let Some(commit_sha) = db_record.commit_sha {
-            result.prompt_commits.entry(id).or_default().push(commit_sha);
+            result
+                .prompt_commits
+                .entry(id)
+                .or_default()
+                .push(commit_sha);
         }
     }
 
@@ -289,10 +293,7 @@ pub fn search_by_pattern(query: &str) -> Result<SearchResult, GitAiError> {
 /// Search for a specific prompt by its ID
 ///
 /// Looks up the prompt in the database first, then falls back to searching git notes.
-pub fn search_by_prompt_id(
-    repo: &Repository,
-    prompt_id: &str,
-) -> Result<SearchResult, GitAiError> {
+pub fn search_by_prompt_id(repo: &Repository, prompt_id: &str) -> Result<SearchResult, GitAiError> {
     let (commit_sha, prompt) = find_prompt_with_db_fallback(prompt_id, Some(repo))?;
 
     let mut result = SearchResult::new();
@@ -309,7 +310,6 @@ pub fn search_by_prompt_id(
 
     Ok(result)
 }
-
 
 /// Search mode determined by CLI arguments
 #[derive(Debug, Clone, PartialEq)]
@@ -397,7 +397,9 @@ pub fn handle_search(args: &[String]) {
     let mode = match parsed.mode {
         Some(m) => m,
         None => {
-            eprintln!("Error: No search mode specified. Use --commit, --file, --pattern, or --prompt-id.");
+            eprintln!(
+                "Error: No search mode specified. Use --commit, --file, --pattern, or --prompt-id."
+            );
             print_search_help();
             std::process::exit(1);
         }
@@ -419,24 +421,20 @@ pub fn handle_search(args: &[String]) {
 
     // Execute the search based on mode
     let result = match &mode {
-        SearchMode::Commit { commit_rev } => {
-            match search_by_commit(&repo, commit_rev) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("Error searching commit '{}': {}", commit_rev, e);
-                    std::process::exit(1);
-                }
+        SearchMode::Commit { commit_rev } => match search_by_commit(&repo, commit_rev) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Error searching commit '{}': {}", commit_rev, e);
+                std::process::exit(1);
             }
-        }
-        SearchMode::CommitRange { start, end } => {
-            match search_by_commit_range(&repo, start, end) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("Error searching commit range '{}..{}': {}", start, end, e);
-                    std::process::exit(1);
-                }
+        },
+        SearchMode::CommitRange { start, end } => match search_by_commit_range(&repo, start, end) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Error searching commit range '{}..{}': {}", start, end, e);
+                std::process::exit(1);
             }
-        }
+        },
         SearchMode::File {
             file_path,
             line_ranges,
@@ -446,21 +444,21 @@ pub fn handle_search(args: &[String]) {
                 eprintln!("Error searching file '{}': {}", file_path, e);
                 std::process::exit(1);
             }
-        }
+        },
         SearchMode::Pattern { query } => match search_by_pattern(query) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Error searching pattern '{}': {}", query, e);
                 std::process::exit(1);
             }
-        }
+        },
         SearchMode::PromptId { prompt_id } => match search_by_prompt_id(&repo, prompt_id) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Error searching prompt ID '{}': {}", prompt_id, e);
                 std::process::exit(1);
             }
-        }
+        },
     };
 
     // Apply filters
@@ -575,8 +573,7 @@ fn format_default(result: &SearchResult, mode: &SearchMode) -> String {
             let files: Vec<String> = locations
                 .iter()
                 .map(|(path, ranges)| {
-                    let range_str: Vec<String> =
-                        ranges.iter().map(|r| format!("{}", r)).collect();
+                    let range_str: Vec<String> = ranges.iter().map(|r| format!("{}", r)).collect();
                     if range_str.is_empty() {
                         path.clone()
                     } else {
@@ -646,11 +643,7 @@ fn format_json(result: &SearchResult, mode: &SearchMode) -> String {
                 })
                 .unwrap_or_default();
 
-            let commits = result
-                .prompt_commits
-                .get(hash)
-                .cloned()
-                .unwrap_or_default();
+            let commits = result.prompt_commits.get(hash).cloned().unwrap_or_default();
 
             (
                 hash.clone(),
@@ -712,8 +705,7 @@ fn format_verbose(result: &SearchResult, mode: &SearchMode) -> String {
             let files: Vec<String> = locations
                 .iter()
                 .map(|(path, ranges)| {
-                    let range_str: Vec<String> =
-                        ranges.iter().map(|r| format!("{}", r)).collect();
+                    let range_str: Vec<String> = ranges.iter().map(|r| format!("{}", r)).collect();
                     format!("{}:{}", path, range_str.join(","))
                 })
                 .collect();
@@ -964,7 +956,10 @@ fn parse_line_range(s: &str) -> Result<(u32, u32), String> {
             .parse()
             .map_err(|_| format!("Invalid line number: {}", &s[pos + 1..]))?;
         if start > end {
-            return Err(format!("Invalid line range: start ({}) > end ({})", start, end));
+            return Err(format!(
+                "Invalid line range: start ({}) > end ({})",
+                start, end
+            ));
         }
         Ok((start, end))
     } else {
@@ -1083,7 +1078,9 @@ fn print_search_help() {
     eprintln!("SEARCH MODES (at least one required):");
     eprintln!("    --commit <rev>          Search by commit SHA, branch, tag, or symbolic ref");
     eprintln!("                            Supports ranges: <sha1>..<sha2>");
-    eprintln!("    --file <path>           Search by file path (relative to repo root or absolute)");
+    eprintln!(
+        "    --file <path>           Search by file path (relative to repo root or absolute)"
+    );
     eprintln!("    --pattern <text>        Full-text search in prompt messages");
     eprintln!("    --prompt-id <id>        Look up specific prompt by ID");
     eprintln!();

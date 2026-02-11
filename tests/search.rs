@@ -322,8 +322,7 @@ fn test_search_by_pattern() {
     let _commit_sha = create_ai_commit(&repo, "continue-cli-session-simple.json");
 
     // The fixture contains "hello world" in the messages
-    let output = repo
-        .git_ai(&["search", "--pattern", "hello"]);
+    let output = repo.git_ai(&["search", "--pattern", "hello"]);
 
     // Pattern search may or may not find results depending on DB population
     // Just verify it doesn't crash
@@ -445,15 +444,9 @@ fn test_search_output_porcelain() {
             fields.len()
         );
         // First field is the prompt ID (hash)
-        assert!(
-            !fields[0].is_empty(),
-            "First field should be prompt ID"
-        );
+        assert!(!fields[0].is_empty(), "First field should be prompt ID");
         // Second field is the tool
-        assert!(
-            !fields[1].is_empty(),
-            "Second field should be tool name"
-        );
+        assert!(!fields[1].is_empty(), "Second field should be tool name");
     }
 }
 

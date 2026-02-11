@@ -71,7 +71,8 @@ fn create_ai_commit_with_transcript(
 #[test]
 fn test_continue_by_commit_outputs_context() {
     let repo = TestRepo::new();
-    let (commit_sha, _) = create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
+    let (commit_sha, _) =
+        create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
 
     // Run continue command
     let output = repo
@@ -100,7 +101,8 @@ fn test_continue_by_commit_outputs_context() {
 #[test]
 fn test_continue_by_file_outputs_context() {
     let repo = TestRepo::new();
-    let (_, file_path) = create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
+    let (_, file_path) =
+        create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
 
     // Run continue command by file
     let output = repo
@@ -125,7 +127,8 @@ fn test_continue_by_file_outputs_context() {
 #[test]
 fn test_continue_by_prompt_id() {
     let repo = TestRepo::new();
-    let (commit_sha, _) = create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
+    let (commit_sha, _) =
+        create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
 
     // First, search to get the prompt ID
     let search_output = repo
@@ -160,7 +163,8 @@ fn test_continue_by_prompt_id() {
 #[test]
 fn test_continue_context_preamble() {
     let repo = TestRepo::new();
-    let (commit_sha, _) = create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
+    let (commit_sha, _) =
+        create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
 
     let output = repo
         .git_ai(&["continue", "--commit", &commit_sha])
@@ -182,7 +186,8 @@ fn test_continue_context_preamble() {
 #[test]
 fn test_continue_context_ends_with_invitation() {
     let repo = TestRepo::new();
-    let (commit_sha, _) = create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
+    let (commit_sha, _) =
+        create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
 
     let output = repo
         .git_ai(&["continue", "--commit", &commit_sha])
@@ -198,7 +203,8 @@ fn test_continue_context_ends_with_invitation() {
 #[test]
 fn test_continue_context_includes_source_info() {
     let repo = TestRepo::new();
-    let (commit_sha, _) = create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
+    let (commit_sha, _) =
+        create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
 
     let output = repo
         .git_ai(&["continue", "--commit", &commit_sha])
@@ -227,7 +233,8 @@ fn test_continue_context_includes_source_info() {
 #[test]
 fn test_continue_excludes_tool_use_messages() {
     let repo = TestRepo::new();
-    let (commit_sha, _) = create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
+    let (commit_sha, _) =
+        create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
 
     let output = repo
         .git_ai(&["continue", "--commit", &commit_sha])
@@ -250,7 +257,8 @@ fn test_continue_excludes_tool_use_messages() {
 #[test]
 fn test_continue_includes_user_and_assistant() {
     let repo = TestRepo::new();
-    let (commit_sha, _) = create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
+    let (commit_sha, _) =
+        create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
 
     let output = repo
         .git_ai(&["continue", "--commit", &commit_sha])
@@ -418,7 +426,8 @@ fn test_continue_truncation_notice() {
 #[test]
 fn test_continue_json_output() {
     let repo = TestRepo::new();
-    let (commit_sha, _) = create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
+    let (commit_sha, _) =
+        create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
 
     let output = repo
         .git_ai(&["continue", "--commit", &commit_sha, "--json"])
@@ -444,7 +453,8 @@ fn test_continue_json_output() {
 #[test]
 fn test_continue_json_schema() {
     let repo = TestRepo::new();
-    let (commit_sha, _) = create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
+    let (commit_sha, _) =
+        create_ai_commit_with_transcript(&repo, "continue-cli-session-simple.json");
 
     let output = repo
         .git_ai(&["continue", "--commit", &commit_sha, "--json"])
@@ -464,17 +474,25 @@ fn test_continue_json_schema() {
         let source = &parsed["source"];
         assert!(source.get("sha").is_some(), "source should have sha");
         assert!(source.get("author").is_some(), "source should have author");
-        assert!(source.get("message").is_some(), "source should have message");
+        assert!(
+            source.get("message").is_some(),
+            "source should have message"
+        );
     }
 
     // Verify prompts array structure
-    let prompts = parsed["prompts"].as_array().expect("prompts should be array");
+    let prompts = parsed["prompts"]
+        .as_array()
+        .expect("prompts should be array");
     if !prompts.is_empty() {
         let prompt = &prompts[0];
         assert!(prompt.get("id").is_some(), "prompt should have id");
         assert!(prompt.get("tool").is_some(), "prompt should have tool");
         assert!(prompt.get("model").is_some(), "prompt should have model");
-        assert!(prompt.get("messages").is_some(), "prompt should have messages");
+        assert!(
+            prompt.get("messages").is_some(),
+            "prompt should have messages"
+        );
 
         // Verify messages structure
         if let Some(messages) = prompt["messages"].as_array() {
@@ -546,7 +564,11 @@ fn test_continue_redacts_secrets() {
 
     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
     temp_file
-        .write_all(serde_json::to_string(&session_with_secret).unwrap().as_bytes())
+        .write_all(
+            serde_json::to_string(&session_with_secret)
+                .unwrap()
+                .as_bytes(),
+        )
         .unwrap();
     let fixture_path_str = temp_file.path().to_string_lossy().to_string();
 
@@ -625,7 +647,11 @@ fn test_continue_redacts_before_format() {
 
     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
     temp_file
-        .write_all(serde_json::to_string(&session_with_secret).unwrap().as_bytes())
+        .write_all(
+            serde_json::to_string(&session_with_secret)
+                .unwrap()
+                .as_bytes(),
+        )
         .unwrap();
     let fixture_path_str = temp_file.path().to_string_lossy().to_string();
 
