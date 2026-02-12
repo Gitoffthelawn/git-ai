@@ -143,7 +143,7 @@ impl LineRange {
         let apply_offset = |line: u32| -> Option<u32> {
             if line >= insertion_point {
                 let shifted = (line as i64) + (offset as i64);
-                if shifted >= 0 {
+                if shifted >= 0 && shifted <= u32::MAX as i64 {
                     Some(shifted as u32)
                 } else {
                     None
@@ -347,7 +347,10 @@ mod tests {
         //   shifted >= 0, so Some(4294967296 as u32) which wraps to 0
         //   This verifies the i64 arithmetic path doesn't panic.
         let result = LineRange::Single(u32::MAX).shift(0, 1);
-        assert_eq!(result, Some(LineRange::Single(0)));
+        assert_eq!(
+            result, None,
+            "u32::MAX + 1 should overflow u32 and return None"
+        );
     }
 
     // --- PromptRecord::Ord transitivity test ---
