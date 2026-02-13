@@ -1,5 +1,8 @@
 use crate::api::{ApiClient, ApiContext};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::ignore::{
+    build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
+};
 use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
 use crate::authorship::secrets::{redact_secrets_from_prompts, strip_prompt_messages};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
@@ -200,10 +203,11 @@ pub fn post_commit(
         .find_commit(commit_sha.clone())
         .map(|commit| commit.parent_count().unwrap_or(0) > 1)
         .unwrap_or(false);
+    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
     let skip_reason = if is_merge_commit {
         Some(StatsSkipReason::MergeCommit)
     } else {
-        estimate_stats_cost(repo, &parent_sha, &commit_sha)
+        estimate_stats_cost(repo, &parent_sha, &commit_sha, &ignore_patterns)
             .ok()
             .and_then(|estimate| {
                 if should_skip_expensive_post_commit_stats(&estimate) {
@@ -215,7 +219,7 @@ pub fn post_commit(
     };
 
     if skip_reason.is_none() {
-        let computed = stats_for_commit_stats(repo, &commit_sha, &[])?;
+        let computed = stats_for_commit_stats(repo, &commit_sha, &ignore_patterns)?;
         // Record metrics only when we have full stats.
         record_commit_metrics(
             repo,
@@ -303,8 +307,12 @@ fn estimate_stats_cost(
     repo: &Repository,
     parent_sha: &str,
     commit_sha: &str,
+    ignore_patterns: &[String],
 ) -> Result<StatsCostEstimate, GitAiError> {
-    let added_lines_by_file = repo.diff_added_lines(parent_sha, commit_sha, None)?;
+    let mut added_lines_by_file = repo.diff_added_lines(parent_sha, commit_sha, None)?;
+    let ignore_matcher = build_ignore_matcher(ignore_patterns);
+    added_lines_by_file
+        .retain(|file_path, _| !should_ignore_file_with_matcher(file_path, &ignore_matcher));
 
     let files_with_additions = added_lines_by_file
         .values()

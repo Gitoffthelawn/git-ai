@@ -282,9 +282,13 @@ fn benchmark_stats_hunk_density_hotspot() {
         scattered.total_stats.as_secs_f64() * 1000.0
     );
 
-    // Sanity checks: the hotspot should dominate in the scattered case.
-    assert!(scattered.total_stats > contiguous.total_stats);
+    // Sanity check: the diff_ai_accepted hotspot should dominate in the scattered case.
     assert!(scattered.diff_ai_accepted > contiguous.diff_ai_accepted);
+
+    // stats_for_commit_stats no longer uses diff_ai_accepted, so total_stats may be very close
+    // between contiguous and scattered workloads. Keep a broad upper bound to catch regressions.
+    assert!(contiguous.total_stats.as_secs_f64() * 1000.0 < 500.0);
+    assert!(scattered.total_stats.as_secs_f64() * 1000.0 < 500.0);
 }
 
 #[test]

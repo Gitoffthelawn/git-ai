@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::authorship::range_authorship::should_ignore_file;
+use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
 use crate::commands::blame::GitAiBlameOptions;
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
@@ -20,11 +20,12 @@ pub fn diff_ai_accepted_stats(
     ignore_patterns: &[String],
 ) -> Result<DiffAiAcceptedStats, GitAiError> {
     let added_lines_by_file = repo.diff_added_lines(from_ref, to_ref, None)?;
+    let ignore_matcher = build_ignore_matcher(ignore_patterns);
 
     let mut stats = DiffAiAcceptedStats::default();
 
     for (file_path, mut lines) in added_lines_by_file {
-        if should_ignore_file(&file_path, ignore_patterns) {
+        if should_ignore_file_with_matcher(&file_path, &ignore_matcher) {
             continue;
         }
 

@@ -11,6 +11,12 @@ fn extract_json_object(output: &str) -> String {
     output[start..=end].to_string()
 }
 
+fn stats_from_args(repo: &TestRepo, args: &[&str]) -> CommitStats {
+    let raw = repo.git_ai(args).expect("git-ai stats should succeed");
+    let json = extract_json_object(&raw);
+    serde_json::from_str(&json).expect("valid stats json")
+}
+
 #[test]
 fn test_authorship_log_stats() {
     let repo = TestRepo::new();
@@ -377,4 +383,164 @@ fn test_markdown_stats_formatting() {
     let markdown = write_stats_to_markdown(&stats);
     println!("{}", markdown);
     assert_debug_snapshot!(markdown);
+}
+
+#[test]
+fn test_stats_default_ignores_snapshot_files() {
+    let repo = TestRepo::new();
+    repo.filename("README.md").set_contents(lines!["# Repo"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    repo.filename("src/main.rs")
+        .set_contents(lines!["fn main() {}".ai()]);
+    repo.filename("__snapshots__/main.snap")
+        .set_contents(lines![
+            "snapshot line 1",
+            "snapshot line 2",
+            "snapshot line 3"
+        ]);
+    repo.stage_all_and_commit("Add source and snapshot")
+        .unwrap();
+
+    let stats = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 1);
+    assert_eq!(stats.ai_additions, 1);
+}
+
+#[test]
+fn test_stats_default_ignores_lockfiles_and_generated_files() {
+    let repo = TestRepo::new();
+    repo.filename("README.md").set_contents(lines!["# Repo"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    repo.filename("src/lib.rs")
+        .set_contents(lines!["pub fn answer() -> u32 { 42 }".ai()]);
+    repo.filename("Cargo.lock")
+        .set_contents(vec!["lock".to_string().repeat(5); 650]);
+    repo.filename("api.generated.ts")
+        .set_contents(vec!["export type X = string;".to_string(); 500]);
+    repo.stage_all_and_commit("Add source and generated artifacts")
+        .unwrap();
+
+    let stats = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 1);
+    assert_eq!(stats.ai_additions, 1);
+}
+
+#[test]
+fn test_stats_ignores_linguist_generated_patterns() {
+    let repo = TestRepo::new();
+    repo.filename(".gitattributes")
+        .set_contents(lines!["generated/** linguist-generated=true"]);
+    repo.filename("README.md").set_contents(lines!["# Repo"]);
+    repo.stage_all_and_commit("Initial commit with gitattributes")
+        .unwrap();
+
+    repo.filename("src/main.rs")
+        .set_contents(lines!["fn run() {}".ai()]);
+    repo.filename("generated/schema.ts")
+        .set_contents(lines!["export const schema = {};"]);
+    repo.stage_all_and_commit("Add source and linguist-generated file")
+        .unwrap();
+
+    let stats = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 1);
+    assert_eq!(stats.ai_additions, 1);
+}
+
+#[test]
+fn test_stats_keeps_negative_linguist_patterns_counted() {
+    let repo = TestRepo::new();
+    repo.filename(".gitattributes").set_contents(lines![
+        "generated/** linguist-generated=true",
+        "manual/** linguist-generated=false"
+    ]);
+    repo.filename("README.md").set_contents(lines!["# Repo"]);
+    repo.stage_all_and_commit("Initial commit with attrs")
+        .unwrap();
+
+    repo.filename("generated/out.ts")
+        .set_contents(lines!["export const ignored = true;"]);
+    repo.filename("manual/kept.ts")
+        .set_contents(lines!["export const counted = true;".ai()]);
+    repo.stage_all_and_commit("Add generated and manual files")
+        .unwrap();
+
+    let stats = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 1);
+    assert_eq!(stats.ai_additions, 1);
+}
+
+#[test]
+fn test_stats_ignore_flag_is_additive_to_defaults() {
+    let repo = TestRepo::new();
+    repo.filename("README.md").set_contents(lines!["# Repo"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    repo.filename("src/main.rs")
+        .set_contents(lines!["fn main() {}".ai()]);
+    repo.filename("docs/keep.txt")
+        .set_contents(lines!["this line is human"]);
+    repo.stage_all_and_commit("Add docs and source").unwrap();
+
+    let baseline = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
+    assert_eq!(baseline.git_diff_added_lines, 2);
+
+    let ignored = stats_from_args(
+        &repo,
+        &["stats", "HEAD", "--json", "--ignore", "docs/keep.txt"],
+    );
+    assert_eq!(ignored.git_diff_added_lines, 1);
+}
+
+#[test]
+fn test_stats_range_uses_default_ignores() {
+    let repo = TestRepo::new();
+    repo.filename("README.md").set_contents(lines!["# Repo"]);
+    let first = repo.stage_all_and_commit("Initial commit").unwrap();
+
+    repo.filename("src/main.rs")
+        .set_contents(lines!["fn main() {}".ai()]);
+    repo.filename("Cargo.lock")
+        .set_contents(vec!["lockdata".to_string(); 700]);
+    let second = repo
+        .stage_all_and_commit("Add source and lockfile")
+        .unwrap();
+
+    let range = format!("{}..{}", first.commit_sha, second.commit_sha);
+    let raw = repo
+        .git_ai(&["stats", &range, "--json"])
+        .expect("git-ai stats range should succeed");
+    let json = extract_json_object(&raw);
+    let range_stats: git_ai::authorship::range_authorship::RangeAuthorshipStats =
+        serde_json::from_str(&json).unwrap();
+
+    assert_eq!(range_stats.range_stats.git_diff_added_lines, 1);
+    assert_eq!(range_stats.range_stats.ai_additions, 1);
+}
+
+#[test]
+fn test_post_commit_large_ignored_files_do_not_trigger_skip_warning() {
+    let repo = TestRepo::new();
+    repo.filename("README.md").set_contents(lines!["# Repo"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    repo.filename("Cargo.lock")
+        .set_contents(vec!["lockfile-entry".to_string(); 7001]);
+    let commit = repo
+        .stage_all_and_commit("Large lockfile update")
+        .expect("commit should succeed");
+
+    assert!(
+        !commit
+            .stdout
+            .contains("Skipped git-ai stats for large commit"),
+        "large ignored files should not trigger post-commit skip warning: {}",
+        commit.stdout
+    );
+
+    let stats = stats_from_args(&repo, &["stats", "HEAD", "--json"]);
+    assert_eq!(stats.git_diff_added_lines, 0);
+    assert_eq!(stats.ai_additions, 0);
+    assert_eq!(stats.human_additions, 0);
 }

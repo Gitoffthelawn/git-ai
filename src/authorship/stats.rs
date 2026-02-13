@@ -1,4 +1,5 @@
 use crate::authorship::authorship_log::LineRange;
+use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
 use crate::authorship::transcript::Message;
 use crate::error::GitAiError;
 use crate::git::refs::get_authorship;
@@ -557,9 +558,9 @@ pub fn stats_for_commit_stats(
         };
         repo.diff_added_lines(&from_ref, commit_sha, None)?
     };
-    added_lines_by_file.retain(|file_path, _| {
-        !crate::authorship::range_authorship::should_ignore_file(file_path, ignore_patterns)
-    });
+    let ignore_matcher = build_ignore_matcher(ignore_patterns);
+    added_lines_by_file
+        .retain(|file_path, _| !should_ignore_file_with_matcher(file_path, &ignore_matcher));
     for lines in added_lines_by_file.values_mut() {
         lines.sort_unstable();
         lines.dedup();
@@ -658,6 +659,7 @@ pub fn get_git_diff_stats(
 
     let mut added_lines = 0u32;
     let mut deleted_lines = 0u32;
+    let ignore_matcher = build_ignore_matcher(ignore_patterns);
 
     // Parse numstat output
     for line in stdout.lines() {
@@ -675,7 +677,7 @@ pub fn get_git_diff_stats(
         if parts.len() >= 3 {
             // Check if this file should be ignored
             let filename = parts[2];
-            if crate::authorship::range_authorship::should_ignore_file(filename, ignore_patterns) {
+            if should_ignore_file_with_matcher(filename, &ignore_matcher) {
                 continue;
             }
 

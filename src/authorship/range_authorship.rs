@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::authorship::diff_ai_accepted::diff_ai_accepted_stats;
+use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
 use crate::authorship::stats::{CommitStats, stats_for_commit_stats, stats_from_authorship_log};
 use crate::error::GitAiError;
 use crate::git::refs::{CommitAuthorship, get_commits_with_notes_from_list};
@@ -19,25 +20,9 @@ const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// Check if a file path should be ignored based on the provided patterns
 /// Supports both exact matches and glob patterns (e.g., "*.lock", "**/*.generated.js")
+#[allow(dead_code)] // Kept for downstream compatibility.
 pub fn should_ignore_file(path: &str, ignore_patterns: &[String]) -> bool {
-    use glob::Pattern;
-
-    let filename = std::path::Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-
-    ignore_patterns.iter().any(|pattern| {
-        // Try to parse as glob pattern
-        if let Ok(glob_pattern) = Pattern::new(pattern) {
-            // Match against both the full path and just the filename
-            // This allows patterns like "*.lock" (filename) and "**/target/**" (path)
-            glob_pattern.matches(path) || glob_pattern.matches(filename)
-        } else {
-            // Fallback to exact filename match if pattern is invalid
-            filename == pattern
-        }
-    })
+    crate::authorship::ignore::should_ignore_file(path, ignore_patterns)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,11 +179,12 @@ fn create_authorship_log_for_range(
 
     // Step 1: Get list of changed files between the two commits
     let all_changed_files = repo.diff_changed_files(start_sha, end_sha)?;
+    let ignore_matcher = build_ignore_matcher(ignore_patterns);
 
     // Filter out ignored files from the changed files
     let changed_files: Vec<String> = all_changed_files
         .into_iter()
-        .filter(|file| !should_ignore_file(file, ignore_patterns))
+        .filter(|file| !should_ignore_file_with_matcher(file, &ignore_matcher))
         .collect();
 
     // Note: We intentionally do NOT filter to AI-touched files here.
@@ -369,6 +355,7 @@ fn get_git_diff_stats_for_range(
 
     let mut added_lines = 0u32;
     let mut deleted_lines = 0u32;
+    let ignore_matcher = build_ignore_matcher(ignore_patterns);
 
     // Parse numstat output
     for line in stdout.lines() {
@@ -381,7 +368,7 @@ fn get_git_diff_stats_for_range(
         if parts.len() >= 3 {
             // Check if this file should be ignored and skip it
             let filename = parts[2];
-            if should_ignore_file(filename, ignore_patterns) {
+            if should_ignore_file_with_matcher(filename, &ignore_matcher) {
                 continue;
             }
 

@@ -1194,10 +1194,15 @@ mod tests {
 
     #[test]
     fn test_database_path() {
+        let override_path = std::env::var("GIT_AI_TEST_DB_PATH").ok();
         let path = InternalDatabase::database_path().unwrap();
-        assert!(path.to_string_lossy().contains(".git-ai"));
-        assert!(path.to_string_lossy().contains("internal"));
-        assert!(path.to_string_lossy().ends_with("db"));
+        if let Some(override_path) = override_path {
+            assert_eq!(path, PathBuf::from(override_path));
+        } else {
+            assert!(path.to_string_lossy().contains(".git-ai"));
+            assert!(path.to_string_lossy().contains("internal"));
+            assert!(path.to_string_lossy().ends_with("db"));
+        }
     }
 
     #[test]
