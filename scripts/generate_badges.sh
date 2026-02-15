@@ -9,18 +9,10 @@ OUT_DIR="$REPO_ROOT/assets/docs/badges"
 
 mkdir -p "$OUT_DIR"
 
-width=240
 height=100
-left_width=190
-right_width=$(( width - left_width ))
-icon_size=90
-icon_pad_x=$(( (left_width - icon_size) / 2 ))
-icon_pad_y=$(( (height - icon_size) / 2 ))
+right_width=60
+padding=4
 radius=12
-
-# Checkmark dimensions
-check_cx=$(( left_width + right_width / 2 ))
-check_cy=$(( height / 2 ))
 
 count=$(jq length "$CONFIG")
 
@@ -34,6 +26,23 @@ for ((i = 0; i < count; i++)); do
     continue
   fi
 
+  # Read PNG dimensions and compute icon width to preserve aspect ratio
+  read png_w png_h < <(python3 -c "
+import struct, zlib
+with open('$png','rb') as f:
+    f.read(16)
+    w, h = struct.unpack('>II', f.read(8))
+    print(w, h)
+")
+  img_height=$(( height - padding * 2 ))
+  img_width=$(python3 -c "print(int(round($img_height * $png_w / $png_h)))")
+  left_width=$(( img_width + padding * 2 ))
+  width=$(( left_width + right_width ))
+
+  # Checkmark dimensions
+  check_cx=$(( left_width + right_width / 2 ))
+  check_cy=$(( height / 2 ))
+
   b64=$(base64 < "$png" | tr -d '\n')
 
   cat > "$OUT_DIR/${icon}.svg" <<SVGEOF
@@ -43,11 +52,11 @@ for ((i = 0; i < count; i++)); do
   </clipPath>
   <g clip-path="url(#clip-${icon})">
     <rect width="${left_width}" height="${height}" fill="#FFFFFF"/>
-    <rect x="${left_width}" width="${right_width}" height="${height}" fill="#4ADE80"/>
+    <rect x="${left_width}" width="${right_width}" height="${height}" fill="#22C55E"/>
   </g>
-  <image x="${icon_pad_x}" y="${icon_pad_y}" width="${icon_size}" height="${icon_size}" xlink:href="data:image/png;base64,${b64}"/>
+  <image x="${padding}" y="${padding}" width="${img_width}" height="${img_height}" xlink:href="data:image/png;base64,${b64}"/>
   <polyline points="$(( check_cx - 10 )),${check_cy} $(( check_cx - 3 )),$(( check_cy + 10 )) $(( check_cx + 12 )),$(( check_cy - 10 ))" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect width="${width}" height="${height}" rx="${radius}" ry="${radius}" fill="none" stroke="#000000" stroke-width="2.5"/>
+  <rect width="${width}" height="${height}" rx="${radius}" ry="${radius}" fill="none" stroke="#708090" stroke-width="2.5"/>
 </svg>
 SVGEOF
 
