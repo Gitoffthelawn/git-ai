@@ -581,6 +581,202 @@ fn test_binary_and_non_utf8_with_ai_file() {
 }
 
 // =============================================================================
+// Line-level attribution: Prove per-line AI/human attribution is correct
+// with non-UTF-8 files present
+// =============================================================================
+
+#[test]
+fn test_line_attribution_ai_file_with_gbk_neighbor() {
+    let repo = TestRepo::new();
+    let mut ai_file = repo.filename("code.py");
+
+    ai_file.set_contents(lines![
+        "def greet():".ai(),
+        "    return 'hello'".ai(),
+        "# human comment",
+    ]);
+
+    let gbk_path = repo.path().join("chinese.txt");
+    fs::write(&gbk_path, gbk_multiline()).unwrap();
+
+    repo.stage_all_and_commit("Add AI code and GBK file")
+        .unwrap();
+
+    ai_file.assert_lines_and_blame(lines![
+        "def greet():".ai(),
+        "    return 'hello'".ai(),
+        "# human comment".human(),
+    ]);
+}
+
+#[test]
+fn test_line_attribution_multi_commit_with_non_utf8_neighbor() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("app.ts");
+
+    file.set_contents(lines!["const x = 1;", "const y = 2;"]);
+
+    let gbk_path = repo.path().join("legacy.txt");
+    fs::write(&gbk_path, gbk_hello_world()).unwrap();
+
+    repo.stage_all_and_commit("Base commit with GBK neighbor")
+        .unwrap();
+
+    file.insert_at(
+        2,
+        lines![
+            "const ai_z = compute();".ai(),
+            "const ai_w = transform();".ai()
+        ],
+    );
+
+    fs::write(&gbk_path, gbk_multiline()).unwrap();
+
+    repo.stage_all_and_commit("AI additions alongside GBK edit")
+        .unwrap();
+
+    file.assert_lines_and_blame(lines![
+        "const x = 1;".human(),
+        "const y = 2;".human(),
+        "const ai_z = compute();".ai(),
+        "const ai_w = transform();".ai(),
+    ]);
+}
+
+#[test]
+fn test_line_attribution_interleaved_ai_human_with_non_utf8() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("mixed.rs");
+
+    file.set_contents(lines!["fn main() {"]);
+
+    let latin1_path = repo.path().join("notes.txt");
+    fs::write(&latin1_path, latin1_bytes()).unwrap();
+
+    repo.stage_all_and_commit("Base commit").unwrap();
+
+    file.insert_at(
+        1,
+        lines![
+            "    let a = ai_gen();".ai(),
+            "    let b = human_wrote();".human(),
+            "    let c = ai_gen_2();".ai(),
+        ],
+    );
+
+    repo.stage_all_and_commit("Interleaved additions").unwrap();
+
+    file.assert_lines_and_blame(lines![
+        "fn main() {".human(),
+        "    let a = ai_gen();".ai(),
+        "    let b = human_wrote();".human(),
+        "    let c = ai_gen_2();".ai(),
+    ]);
+}
+
+#[test]
+fn test_line_attribution_ai_replaces_lines_with_non_utf8_present() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("config.js");
+
+    file.set_contents(lines![
+        "const a = 1;",
+        "const b = 2;",
+        "const c = 3;",
+        "const d = 4;",
+    ]);
+
+    let sjis_path = repo.path().join("japanese.txt");
+    fs::write(&sjis_path, shift_jis_bytes()).unwrap();
+
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    file.replace_at(1, "const b = ai_replacement();".ai());
+    file.replace_at(2, "const c = ai_replacement_2();".ai());
+
+    repo.stage_all_and_commit("AI replaces middle lines")
+        .unwrap();
+
+    file.assert_lines_and_blame(lines![
+        "const a = 1;".human(),
+        "const b = ai_replacement();".ai(),
+        "const c = ai_replacement_2();".ai(),
+        "const d = 4;".human(),
+    ]);
+}
+
+#[test]
+fn test_line_attribution_multiple_utf8_files_with_non_utf8_neighbors() {
+    let repo = TestRepo::new();
+    let mut file_a = repo.filename("module_a.py");
+    let mut file_b = repo.filename("module_b.py");
+
+    file_a.set_contents(lines!["def func_a():".ai(), "    pass".ai(), "# end of a",]);
+
+    file_b.set_contents(lines![
+        "def func_b():".human(),
+        "    return ai_result()".ai(),
+    ]);
+
+    let gbk_path = repo.path().join("data_gbk.txt");
+    fs::write(&gbk_path, gbk_multiline()).unwrap();
+
+    let latin1_path = repo.path().join("data_latin1.txt");
+    fs::write(&latin1_path, latin1_bytes()).unwrap();
+
+    repo.stage_all_and_commit("Add multiple files with non-UTF-8 neighbors")
+        .unwrap();
+
+    file_a.assert_lines_and_blame(lines![
+        "def func_a():".ai(),
+        "    pass".ai(),
+        "# end of a".human(),
+    ]);
+
+    file_b.assert_lines_and_blame(lines![
+        "def func_b():".human(),
+        "    return ai_result()".ai(),
+    ]);
+}
+
+#[test]
+fn test_line_attribution_ai_across_multiple_commits_with_non_utf8() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("evolving.ts");
+
+    file.set_contents(lines!["const base = true;", ""]);
+
+    let gbk_path = repo.path().join("persistent_gbk.txt");
+    fs::write(&gbk_path, gbk_hello_world()).unwrap();
+
+    repo.stage_all_and_commit("Base commit").unwrap();
+
+    file.insert_at(
+        1,
+        lines!["const first_ai = 1;".ai(), "const second_ai = 2;".ai()],
+    );
+
+    fs::write(&gbk_path, gbk_multiline()).unwrap();
+
+    repo.stage_all_and_commit("First AI batch").unwrap();
+
+    file.insert_at(
+        3,
+        lines!["const third_ai = 3;".ai(), "const fourth_ai = 4;".ai()],
+    );
+
+    repo.stage_all_and_commit("Second AI batch").unwrap();
+
+    file.assert_lines_and_blame(lines![
+        "const base = true;".human(),
+        "const first_ai = 1;".ai(),
+        "const second_ai = 2;".ai(),
+        "const third_ai = 3;".ai(),
+        "const fourth_ai = 4;".ai(),
+    ]);
+}
+
+// =============================================================================
 // Edge case: File that starts as UTF-8 and becomes non-UTF-8
 // =============================================================================
 
