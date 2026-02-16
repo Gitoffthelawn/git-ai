@@ -3,13 +3,11 @@
 <img src="https://github.com/git-ai-project/git-ai/raw/main/assets/docs/git-ai.png" align="right"
      alt="Git AI Logo" width="140" height="140">
 
-Git AI is an open source git extension that keeps track of the AI-generated code in your repositories. While you work each AI line is transparently linked to the agent, model plan/prompts; so that the intent, requirements and architecture decisions is preserved. 
+Git AI is an open source git extension that tracks the AI-generated code in your repositories. With Git AI, every AI line is automatically linked to the agent, model, and prompts that generated it — ensuring the intent, requirements, and architecture decisions behind your code are never forgotten.
 
 * **Cross Agent AI Blame** - our [open standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) for tracking AI-attribution is supported by every major coding agent. 
-* **Save your prompts** - saving the context behind every line makes it possible to review, maintain and build on top of AI-generated code. Securely store your team's prompts on your own infrastructure. 
+* **Save your prompts** - saving the context behind every line makes it possible to review, maintain and build on top of AI-generated code.
 * **No workflow changes** - Just prompt, edit and commit. Git AI accuratly tracks AI-code without making your git history messy. Attributions live in Git Notes and survive squash, rebase, reset, stash/pop cherry-pick etc.
-
-
 
 
 > Supported Agents:
@@ -20,13 +18,13 @@ Git AI is an open source git extension that keeps track of the AI-generated code
 
 ## Install
 
-#### Mac, Linux, Windows (WSL)
+Mac, Linux, Windows (WSL)
 
 ```bash
 curl -sSL https://usegitai.com/install.sh | bash
 ```
 
-#### Windows (non-WSL)
+Windows (non-WSL)
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com/install.ps1 | iex"
@@ -38,54 +36,68 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com
 
 ## AI-Blame 
 
-Git AI blame is a drop-in replacement for git blame that reports the AI attribution for each line: 
+Git AI blame is a drop-in replacement for `git blame` that reports the AI attribution for each line and is compatible with [all the `git blame` flags](https://git-scm.com/docs/git-blame).
 
 ```bash
 git-ai blame /src/log_fmt/authorship_log.rs
 ```
-<img width="1526" height="808" alt="image" src="https://github.com/user-attachments/assets/e1f2bcbe-d990-4932-92fc-55a7477a2416" />
+
+```bash
+cb832b7 (Aidan Cunniffe 2025-12-13 08:16:29 -0500  133) pub fn execute_diff(
+cb832b7 (Aidan Cunniffe 2025-12-13 08:16:29 -0500  134)     repo: &Repository,
+cb832b7 (Aidan Cunniffe 2025-12-13 08:16:29 -0500  135)     spec: DiffSpec,
+cb832b7 (Aidan Cunniffe 2025-12-13 08:16:29 -0500  136)     format: DiffFormat,
+cb832b7 (Aidan Cunniffe 2025-12-13 08:16:29 -0500  137) ) -> Result<String, GitAiError> {
+fe2c4c8 (claude         2025-12-02 19:25:13 -0500  138)     // Resolve commits to get from/to SHAs
+fe2c4c8 (claude         2025-12-02 19:25:13 -0500  139)     let (from_commit, to_commit) = match spec {
+fe2c4c8 (claude         2025-12-02 19:25:13 -0500  140)         DiffSpec::TwoCommit(start, end) => {
+fe2c4c8 (claude         2025-12-02 19:25:13 -0500  141)             // Resolve both commits
+fe2c4c8 (claude         2025-12-02 19:25:13 -0500  142)             let from = resolve_commit(repo, &start)?;
+fe2c4c8 (claude         2025-12-02 19:25:13 -0500  143)             let to = resolve_commit(repo, &end)?;
+fe2c4c8 (claude         2025-12-02 19:25:13 -0500  144)             (from, to)
+fe2c4c8 (claude         2025-12-02 19:25:13 -0500  145)         }
+```
 
 ### IDE Plugins 
 
-In VSCode, Cursor, Windsurf and Antigravity the [Git AI extension](https://marketplace.visualstudio.com/items?itemName=git-ai.git-ai-vscode) shows see AI-blame decorations in the gutter color-coded by the session that generated those lines. 
+In VSCode, Cursor, Windsurf and Antigravity the [Git AI extension](https://marketplace.visualstudio.com/items?itemName=git-ai.git-ai-vscode) shows AI-blame decorations in the gutter that are color-coded by the session that generated those lines. If you have prompt storage setup you can hover over the line to see the raw prompt / summary. 
+
+<img width="1192" height="890" alt="image" src="https://github.com/user-attachments/assets/94e332e7-5d96-4e5c-8757-63ac0e2f88e0" />
 
 Also availible in: 
 - Emacs magit - https://github.com/jwiegley/magit-ai
 - *...have you built support into another editor? Open a PR and we'll add it here*  
 
-| Color-coded by Agent Session | Read the prompts / summaries |
-|---|---|
-| <img width="1192" height="890" alt="image" src="https://github.com/user-attachments/assets/94e332e7-5d96-4e5c-8757-63ac0e2f88e0" /> | <img width="1206" height="469" alt="image" src="https://github.com/user-attachments/assets/cc87f99d-208d-4007-b156-8ea9be4d6141" /> |
-
 ## Understand why with the `/ask` skill
 
-See something you don't understand? The /ask skill lets you talk to the agent who wrote the code — its instructions, its decisions, the engineer's intent. Git AI gives you the context you need to maintain and build on top of the massive volume of AI-generated code flooding your codebases.
+See something you don't understand? The `/ask` skill lets you talk to the agent who wrote the code about its instructions, decisions, and the intent of the engineer who assigned it the task. Git AI gives engineers and agents the context they need to maintain and build on top of AI-generated code.
 
 Git AI installs its `/ask` skill to `~/.agents/skills/` and `~/.claude/skills/` allowing you to invoke it Cursor, Claude Code, Copilot, Codex, etc just by typing `/ask`:
 
 ```
-/ask Why didn't we use the Sentry SDK here?
+/ask Why didn't we use the SDK here?
 ```
 
-
+Agents with access to the original intent and the source code understand the "why". Agents who can only read the code, can tell you what the code does, but not why: 
 
 | Reading Code + Prompts (`/ask`) | Only Reading Code (not using Git AI) |
 |---|---|
-| When Aidan was building telemetry, he instructed the agent not to block the CLI exit — users shouldn't see the CLI hang because of telemetry. So instead of using the Sentry SDK directly, we came up with a pattern that writes events locally first via `append_envelope()`, then flushes them in the background via a detached subprocess. This keeps the hot path fast and ships telemetry async after the fact. | `src/commands/flush_logs.rs` is a 5-line wrapper that delegates to `src/observability/flush.rs` (~700 lines). The `commands/` layer handles CLI dispatch; `observability/` handles Sentry, PostHog, metrics upload, and log processing. Parallel modules like `flush_cas`, `flush_logs`, `flush_metrics_db` follow the same thin-dispatch pattern. |
+| When Aidan was building telemetry, he instructed the agent not to block the exit of our CLI flushing telemetry. Instead of using the Sentry SDK directly, we came up with a pattern that writes events locally first via `append_envelope()`, then flushes them in the background via a detached subprocess. This keeps the hot path fast and ships telemetry async after the fact. | `src/commands/flush_logs.rs` is a 5-line wrapper that delegates to `src/observability/flush.rs` (~700 lines). The `commands/` layer handles CLI dispatch; `observability/` handles Sentry, PostHog, metrics upload, and log processing. Parallel modules like `flush_cas`, `flush_logs`, `flush_metrics_db` follow the same thin-dispatch pattern. |
 
 
-## Make your Agents Smarter
-When agents can read past prompts and understand what existing code is supposed to do, they make fewer mistakes, and produce more maintainable code.
+## Make your agents smarter
+Agents make fewer mistakes, and produce more maintainable code, when they understand the requirements and decisions behind the code they're building on. We've found the best way to provide this context is just to provide agents with the same `/ask` tool we built for engineers. Tell your Agents to use `/ask` in Plan mode: 
 
-
-
-
+`Claude|AGENTS.md`
+```markdown
+- In plan mode, always use the /ask skill so you can read the code and the original prompts that generated it. Intent will help you write a better plan
+```
 
 --- 
 
 ### Measure the actual impact of AI-code
 
-
+...stats
 
 
 #### How Does it work? 
