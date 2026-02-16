@@ -46,6 +46,17 @@ impl GitTestMode {
     }
 }
 
+#[cfg(unix)]
+fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+
 #[derive(Clone, Debug)]
 pub struct TestRepo {
     path: PathBuf,
@@ -293,6 +304,7 @@ impl TestRepo {
         if self.git_mode.uses_hooks() {
             command.env("HOME", &self.test_home);
             command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
+            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
         }
 
         if self.git_mode.uses_wrapper() {
@@ -304,8 +316,10 @@ impl TestRepo {
         if self.git_mode.uses_hooks() {
             command.env("HOME", &self.test_home);
             command.env("GIT_CONFIG_GLOBAL", self.test_home.join(".gitconfig"));
+            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
         }
     }
+
 
     /// Patch the git-ai config for this test repo
     /// Allows overriding specific config properties like ignore_prompts, telemetry settings, etc.

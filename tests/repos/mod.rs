@@ -65,6 +65,7 @@ macro_rules! subdir_test_variants {
                                 "GIT_CONFIG_GLOBAL",
                                 self.inner.test_home_path().join(".gitconfig"),
                             );
+                            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
                         }
 
                         // Add config patch if present
@@ -133,6 +134,7 @@ macro_rules! subdir_test_variants {
                                     "GIT_CONFIG_GLOBAL",
                                     self.inner.test_home_path().join(".gitconfig"),
                                 );
+                                command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
                             }
 
                             if let Some(patch) = &self.inner.config_patch {
