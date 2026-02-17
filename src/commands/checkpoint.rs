@@ -277,22 +277,22 @@ pub fn run(
 
     if show_working_log {
         if checkpoints.is_empty() {
-            debug_log("No working log entries found.");
+            eprintln!("No working log entries found.");
         } else {
-            debug_log("Working Log Entries:");
-            debug_log(&"=".repeat(80).to_string());
+            eprintln!("Working Log Entries:");
+            eprintln!("{}", "=".repeat(80));
             for (i, checkpoint) in checkpoints.iter().enumerate() {
-                debug_log(&format!("Checkpoint {}", i + 1));
-                debug_log(&format!("  Diff: {}", checkpoint.diff));
-                debug_log(&format!("  Author: {}", checkpoint.author));
-                debug_log(&format!(
+                eprintln!("Checkpoint {}", i + 1);
+                eprintln!("  Diff: {}", checkpoint.diff);
+                eprintln!("  Author: {}", checkpoint.author);
+                eprintln!(
                     "  Agent ID: {}",
                     checkpoint
                         .agent_id
                         .as_ref()
                         .map(|id| id.tool.clone())
                         .unwrap_or_default()
-                ));
+                );
 
                 // Display first user message from transcript if available
                 if let Some(transcript) = &checkpoint.transcript
@@ -305,23 +305,23 @@ pub fn run(
                         .map(|id| format!(" (Agent: {})", id.tool))
                         .unwrap_or_default();
                     let message_count = transcript.messages().len();
-                    debug_log(&format!(
+                    eprintln!(
                         "  First message{} ({} messages): {}",
                         agent_info, message_count, text
-                    ));
+                    );
                 }
 
-                debug_log("  Entries:");
+                eprintln!("  Entries:");
                 for entry in &checkpoint.entries {
-                    debug_log(&format!("    File: {}", entry.file));
-                    debug_log(&format!("    Blob SHA: {}", entry.blob_sha));
-                    debug_log(&format!(
+                    eprintln!("    File: {}", entry.file);
+                    eprintln!("    Blob SHA: {}", entry.blob_sha);
+                    eprintln!(
                         "    Line Attributions: {:?}",
                         entry.line_attributions
-                    ));
-                    debug_log(&format!("    Attributions: {:?}", entry.attributions));
+                    );
+                    eprintln!("    Attributions: {:?}", entry.attributions);
                 }
-                debug_log("");
+                eprintln!();
             }
         }
         return Ok((0, files.len(), checkpoints.len()));
