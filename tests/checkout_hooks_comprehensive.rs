@@ -162,6 +162,9 @@ fn test_post_checkout_hook_success() {
     repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
+    // Capture original branch before switching
+    let original_branch = repo.current_branch();
+
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     repo.filename("feature.txt")
         .set_contents(vec!["feature"])
@@ -172,10 +175,10 @@ fn test_post_checkout_hook_success() {
         repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = Some(feature_commit.commit_sha.clone());
 
-    // Checkout back to main
-    repo.git(&["checkout", "main"]).unwrap();
+    // Checkout back to original branch
+    repo.git(&["checkout", &original_branch]).unwrap();
 
-    let parsed_args = make_checkout_invocation(&["main"]);
+    let parsed_args = make_checkout_invocation(&[&original_branch]);
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -350,6 +353,9 @@ fn test_post_checkout_hook_force_checkout() {
     repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
+    // Capture original branch before switching
+    let original_branch = repo.current_branch();
+
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     repo.filename("feature.txt")
         .set_contents(vec!["feature"])
@@ -369,13 +375,13 @@ fn test_post_checkout_hook_force_checkout() {
         .unwrap();
 
     // Force checkout discards changes
-    repo.git(&["checkout", "-f", "main"]).unwrap();
+    repo.git(&["checkout", "-f", &original_branch]).unwrap();
 
     let mut repository =
         repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = Some(old_head.clone());
 
-    let parsed_args = make_checkout_invocation(&["--force", "main"]);
+    let parsed_args = make_checkout_invocation(&["--force", &original_branch]);
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -399,6 +405,9 @@ fn test_post_checkout_hook_force_short_flag() {
     repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
+    // Capture original branch before switching
+    let original_branch = repo.current_branch();
+
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
     let old_head = repository::find_repository_in_path(repo.path().to_str().unwrap())
@@ -408,13 +417,13 @@ fn test_post_checkout_hook_force_short_flag() {
         .target()
         .unwrap();
 
-    repo.git(&["checkout", "main"]).unwrap();
+    repo.git(&["checkout", &original_branch]).unwrap();
 
     let mut repository =
         repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     repository.pre_command_base_commit = Some(old_head.clone());
 
-    let parsed_args = make_checkout_invocation(&["-f", "main"]);
+    let parsed_args = make_checkout_invocation(&["-f", &original_branch]);
     let mut context = CommandHooksContext {
         pre_commit_hook_result: None,
         rebase_original_head: None,
@@ -438,6 +447,9 @@ fn test_post_checkout_hook_with_merge() {
     repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
+    // Capture original branch before switching
+    let original_branch = repo.current_branch();
+
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
     let old_head = repository::find_repository_in_path(repo.path().to_str().unwrap())
@@ -447,7 +459,7 @@ fn test_post_checkout_hook_with_merge() {
         .target()
         .unwrap();
 
-    repo.git(&["checkout", "main"]).unwrap();
+    repo.git(&["checkout", &original_branch]).unwrap();
 
     let mut repository =
         repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
@@ -465,7 +477,7 @@ fn test_post_checkout_hook_with_merge() {
     // In real scenario, pre_checkout_hook would populate this
     // context.stashed_va = Some(...);
 
-    let parsed_args = make_checkout_invocation(&["--merge", "main"]);
+    let parsed_args = make_checkout_invocation(&["--merge", &original_branch]);
     let exit_status = std::process::Command::new("true").status().unwrap();
 
     post_checkout_hook(&parsed_args, &mut repository, exit_status, &mut context);
@@ -656,6 +668,9 @@ fn test_checkout_normal_flow() {
     repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
 
+    // Capture original branch before switching
+    let original_branch = repo.current_branch();
+
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     repo.filename("feature.txt")
         .set_contents(vec!["feature"])
@@ -673,7 +688,7 @@ fn test_checkout_normal_flow() {
         push_authorship_handle: None,
         stashed_va: None,
     };
-    let parsed_args = make_checkout_invocation(&["main"]);
+    let parsed_args = make_checkout_invocation(&[&original_branch]);
 
     // Pre-hook
     pre_checkout_hook(&parsed_args, &mut repository, &mut context);
@@ -682,7 +697,7 @@ fn test_checkout_normal_flow() {
     let old_head = repository.pre_command_base_commit.clone();
 
     // Actual checkout
-    repo.git(&["checkout", "main"]).unwrap();
+    repo.git(&["checkout", &original_branch]).unwrap();
 
     // Post-hook
     repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
@@ -698,6 +713,9 @@ fn test_checkout_force_flow() {
 
     repo.filename("base.txt").set_contents(vec!["base"]).stage();
     repo.commit("base commit").unwrap();
+
+    // Capture original branch before switching
+    let original_branch = repo.current_branch();
 
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     repo.filename("feature.txt")
@@ -721,14 +739,14 @@ fn test_checkout_force_flow() {
         push_authorship_handle: None,
         stashed_va: None,
     };
-    let parsed_args = make_checkout_invocation(&["--force", "main"]);
+    let parsed_args = make_checkout_invocation(&["--force", &original_branch]);
 
     // Pre-hook
     pre_checkout_hook(&parsed_args, &mut repository, &mut context);
     let old_head = repository.pre_command_base_commit.clone().unwrap();
 
     // Force checkout
-    repo.git(&["checkout", "-f", "main"]).unwrap();
+    repo.git(&["checkout", "-f", &original_branch]).unwrap();
 
     // Post-hook
     repository = repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
