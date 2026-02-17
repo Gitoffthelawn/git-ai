@@ -448,11 +448,10 @@ try {
 
     # Detect if Git Bash is installed
     $gitBashInstalled = $false
-    $gitForWindowsPaths = @(
-        (Join-Path $env:ProgramFiles 'Git\bin\bash.exe'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Git\bin\bash.exe'),
-        (Join-Path $env:LOCALAPPDATA 'Programs\Git\bin\bash.exe')
-    )
+    $gitForWindowsPaths = @()
+    if ($env:ProgramFiles) { $gitForWindowsPaths += Join-Path $env:ProgramFiles 'Git\bin\bash.exe' }
+    if (${env:ProgramFiles(x86)}) { $gitForWindowsPaths += Join-Path ${env:ProgramFiles(x86)} 'Git\bin\bash.exe' }
+    if ($env:LOCALAPPDATA) { $gitForWindowsPaths += Join-Path $env:LOCALAPPDATA 'Programs\Git\bin\bash.exe' }
     foreach ($p in $gitForWindowsPaths) {
         if ($p -and (Test-Path -LiteralPath $p)) {
             $gitBashInstalled = $true
