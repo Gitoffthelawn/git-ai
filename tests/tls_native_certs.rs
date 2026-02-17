@@ -40,8 +40,7 @@ fn test_https_request_to_public_endpoint() {
         Err(e) => {
             let err_str = e.to_string();
             assert!(
-                !err_str.contains("UnknownIssuer")
-                    && !err_str.contains("invalid peer certificate"),
+                !err_str.contains("UnknownIssuer") && !err_str.contains("invalid peer certificate"),
                 "TLS certificate validation failed unexpectedly: {}",
                 err_str
             );
