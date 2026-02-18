@@ -534,13 +534,13 @@ fn handle_checkpoint(args: &[String]) {
     let repo_result = find_repository_in_path(&final_working_dir);
 
     let config = config::Config::get();
-    if let Ok(ref repo) = repo_result {
-        if !config.is_allowed_repository(&Some(repo.clone())) {
-            eprintln!(
-                "Skipping checkpoint because repository is excluded or not in allow_repositories list"
-            );
-            std::process::exit(0);
-        }
+    if let Ok(ref repo) = repo_result
+        && !config.is_allowed_repository(&Some(repo.clone()))
+    {
+        eprintln!(
+            "Skipping checkpoint because repository is excluded or not in allow_repositories list"
+        );
+        std::process::exit(0);
     }
 
     // If the working directory is not a git repository, we need to detect repos from file paths
