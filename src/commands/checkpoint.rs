@@ -3,6 +3,9 @@ use crate::authorship::attribution_tracker::{
 };
 use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::authorship_log_serialization::generate_short_hash;
+use crate::authorship::ignore::{
+    IgnoreMatcher, build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
+};
 use crate::authorship::imara_diff_utils::{LineChangeTag, compute_line_changes};
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
@@ -132,6 +135,9 @@ pub fn run(
         ));
     }
 
+    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+    let ignore_matcher = build_ignore_matcher(&ignore_patterns);
+
     // Initialize the new storage system
     let storage_start = Instant::now();
     let repo_storage = RepoStorage::for_repo_path(repo.path(), &repo.workdir()?);
@@ -254,6 +260,7 @@ pub fn run(
         &working_log,
         pathspec_filter,
         is_pre_commit,
+        &ignore_matcher,
     )?;
     debug_log(&format!(
         "[BENCHMARK] get_all_tracked_files found {} files, took {:?}",
@@ -526,6 +533,7 @@ fn get_status_of_files(
     working_log: &PersistedWorkingLog,
     edited_filepaths: HashSet<String>,
     skip_untracked: bool,
+    ignore_matcher: &IgnoreMatcher,
 ) -> Result<Vec<String>, GitAiError> {
     let mut files = Vec::new();
 
@@ -547,6 +555,10 @@ fn get_status_of_files(
     for entry in statuses {
         // Skip ignored files
         if entry.kind == EntryKind::Ignored {
+            continue;
+        }
+
+        if should_ignore_file_with_matcher(&entry.path, ignore_matcher) {
             continue;
         }
 
@@ -588,9 +600,16 @@ fn get_all_tracked_files(
     working_log: &PersistedWorkingLog,
     edited_filepaths: Option<&Vec<String>>,
     is_pre_commit: bool,
+    ignore_matcher: &IgnoreMatcher,
 ) -> Result<Vec<String>, GitAiError> {
     let mut files: HashSet<String> = edited_filepaths
-        .map(|paths| paths.iter().cloned().collect())
+        .map(|paths| {
+            paths
+                .iter()
+                .map(|path| normalize_to_posix(path))
+                .filter(|path| !should_ignore_file_with_matcher(path, ignore_matcher))
+                .collect()
+        })
         .unwrap_or_default();
 
     // Helper closure to check if a path is within the repository
@@ -622,6 +641,9 @@ fn get_all_tracked_files(
             ));
             continue;
         }
+        if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+            continue;
+        }
         if is_text_file(working_log, &normalized_path) {
             files.insert(normalized_path);
         }
@@ -643,6 +665,9 @@ fn get_all_tracked_files(
                         "Skipping checkpoint file outside repository: {}",
                         normalized_path
                     ));
+                    continue;
+                }
+                if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
                     continue;
                 }
                 if !files.contains(&normalized_path) {
@@ -669,9 +694,9 @@ fn get_all_tracked_files(
 
     let status_files_start = Instant::now();
     let mut results_for_tracked_files = if is_pre_commit && !has_ai_checkpoints {
-        get_status_of_files(repo, working_log, files, true)?
+        get_status_of_files(repo, working_log, files, true, ignore_matcher)?
     } else {
-        get_status_of_files(repo, working_log, files, false)?
+        get_status_of_files(repo, working_log, files, false, ignore_matcher)?
     };
     debug_log(&format!(
         "[BENCHMARK]   get_status_of_files in get_all_tracked_files took {:?}",
@@ -689,6 +714,9 @@ fn get_all_tracked_files(
                     "Skipping dirty file outside repository: {}",
                     normalized_path
                 ));
+                continue;
+            }
+            if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
                 continue;
             }
             // Only add if not already in the files list
@@ -1890,6 +1918,87 @@ mod tests {
         assert!(
             human_only_entry.line_attributions.is_empty(),
             "Human-only file should use fast path with empty line attributions"
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_skips_default_ignored_files() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("README.md", "# repo\n", true).unwrap();
+        repo.commit_with_message("initial").unwrap();
+
+        std::fs::write(repo.path().join("README.md"), "# repo\n\nupdated\n").unwrap();
+        std::fs::write(repo.path().join("Cargo.lock"), "# lock\n# lock2\n").unwrap();
+
+        repo.trigger_checkpoint_with_author("human").unwrap();
+
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
+                .expect("Repository should exist");
+        let base_commit = gitai_repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+        let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit);
+        let checkpoints = working_log.read_all_checkpoints().unwrap();
+        let latest = checkpoints.last().unwrap();
+
+        assert!(
+            latest.entries.iter().any(|entry| entry.file == "README.md"),
+            "Expected non-ignored source file to be checkpointed"
+        );
+        assert!(
+            latest
+                .entries
+                .iter()
+                .all(|entry| entry.file != "Cargo.lock"),
+            "Expected Cargo.lock to be filtered by default ignore patterns"
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_skips_linguist_generated_files_from_root_gitattributes() {
+        let repo = TmpRepo::new().unwrap();
+        repo.write_file("README.md", "# repo\n", true).unwrap();
+        repo.commit_with_message("initial").unwrap();
+
+        repo.write_file(".gitattributes", "generated/** linguist-generated\n", true)
+            .unwrap();
+        repo.commit_with_message("attrs").unwrap();
+
+        std::fs::create_dir_all(repo.path().join("generated")).unwrap();
+        std::fs::write(
+            repo.path().join("generated").join("api.generated.ts"),
+            "// generated\n// generated 2\n",
+        )
+        .unwrap();
+        repo.write_file("main.rs", "fn main() {}\n", false).unwrap();
+
+        repo.trigger_checkpoint_with_author("human").unwrap();
+
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
+                .expect("Repository should exist");
+        let base_commit = gitai_repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+        let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit);
+        let checkpoints = working_log.read_all_checkpoints().unwrap();
+        let latest = checkpoints.last().unwrap();
+
+        assert!(
+            latest.entries.iter().any(|entry| entry.file == "main.rs"),
+            "Expected non-generated file to be checkpointed"
+        );
+        assert!(
+            latest
+                .entries
+                .iter()
+                .all(|entry| entry.file != "generated/api.generated.ts"),
+            "Expected linguist-generated file to be filtered via .gitattributes"
         );
     }
 
