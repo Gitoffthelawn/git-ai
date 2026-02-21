@@ -190,19 +190,10 @@ fn test_checkpoint_honors_git_ai_ignore_file() {
 
     write_file(&repo, ".git-ai-ignore", "docs/**\n");
     write_file(&repo, "src/main.rs", "fn main() {}\nfn added() {}\n");
-    write_file(
-        &repo,
-        "docs/guide.md",
-        "# Guide\nLine 1\nLine 2\n",
-    );
+    write_file(&repo, "docs/guide.md", "# Guide\nLine 1\nLine 2\n");
 
-    repo.git_ai(&[
-        "checkpoint",
-        "mock_ai",
-        "src/main.rs",
-        "docs/guide.md",
-    ])
-    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/main.rs", "docs/guide.md"])
+        .unwrap();
 
     let checkpoints = repo.current_working_logs().read_all_checkpoints().unwrap();
     let latest = checkpoints.last().expect("checkpoint should be present");
@@ -236,19 +227,10 @@ fn test_status_honors_git_ai_ignore_file() {
         "src/app.ts",
         "export const app = 1;\nexport const next = 2;\n",
     );
-    write_file(
-        &repo,
-        "docs/api.md",
-        "# API\nendpoint 1\nendpoint 2\n",
-    );
+    write_file(&repo, "docs/api.md", "# API\nendpoint 1\nendpoint 2\n");
 
-    repo.git_ai(&[
-        "checkpoint",
-        "mock_ai",
-        "src/app.ts",
-        "docs/api.md",
-    ])
-    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "src/app.ts", "docs/api.md"])
+        .unwrap();
 
     let status = status_from_args(&repo, &["status", "--json"]);
 
@@ -281,11 +263,7 @@ fn test_status_git_ai_ignore_union_with_gitattributes() {
         "generated/out.ts",
         "export const gen = 1;\nexport const gen2 = 2;\n",
     );
-    write_file(
-        &repo,
-        "docs/api.md",
-        "# API\nendpoint 1\nendpoint 2\n",
-    );
+    write_file(&repo, "docs/api.md", "# API\nendpoint 1\nendpoint 2\n");
 
     repo.git_ai(&[
         "checkpoint",
