@@ -386,6 +386,30 @@ fn set_hooks_path_in_config(
     Ok(true)
 }
 
+fn unset_hooks_path_in_local_config(repo: &Repository, dry_run: bool) -> Result<bool, GitAiError> {
+    let local_config_path = repo.path().join("config");
+    if read_hooks_path_from_config(&local_config_path, gix_config::Source::Local).is_none() {
+        return Ok(false);
+    }
+
+    if !dry_run {
+        let mut args = repo.global_args_for_exec();
+        args.extend(
+            [
+                "config",
+                "--local",
+                "--unset-all",
+                CONFIG_KEY_CORE_HOOKS_PATH,
+            ]
+            .iter()
+            .map(|value| value.to_string()),
+        );
+        crate::git::repository::exec_git(&args)?;
+    }
+
+    Ok(true)
+}
+
 fn read_repo_hook_state(path: &Path) -> Result<Option<RepoHookState>, GitAiError> {
     if !path.exists() {
         return Ok(None);
@@ -670,6 +694,12 @@ pub struct EnsureRepoHooksReport {
     pub managed_hooks_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RemoveRepoHooksReport {
+    pub changed: bool,
+    pub managed_hooks_path: PathBuf,
+}
+
 pub fn ensure_repo_hooks_installed(
     repo: &Repository,
     dry_run: bool,
@@ -729,6 +759,68 @@ pub fn ensure_repo_hooks_installed(
     changed |= save_repo_hook_state(&state_path, &state, dry_run)?;
 
     Ok(EnsureRepoHooksReport {
+        changed,
+        managed_hooks_path: managed_hooks_dir,
+    })
+}
+
+pub fn remove_repo_hooks(
+    repo: &Repository,
+    dry_run: bool,
+) -> Result<RemoveRepoHooksReport, GitAiError> {
+    let managed_hooks_dir = managed_git_hooks_dir_for_repo(repo);
+    let state_path = repo_state_path(repo);
+    let enablement_path = repo_enablement_path(repo);
+    let rebase_state_path = rebase_hook_mask_state_path(repo);
+    let local_config_path = repo.path().join("config");
+    let prior_state = read_repo_hook_state(&state_path)?;
+
+    let current_local_hooks =
+        read_hooks_path_from_config(&local_config_path, gix_config::Source::Local)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+    let local_points_to_managed = current_local_hooks
+        .as_deref()
+        .is_some_and(|path| normalize_path(Path::new(path)) == normalize_path(&managed_hooks_dir));
+
+    let restored_local_hooks = prior_state
+        .as_ref()
+        .and_then(|state| state.original_local_hooks_path.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| {
+            normalize_path(path) != normalize_path(&managed_hooks_dir)
+                && !is_disallowed_forward_hooks_path(path, Some(repo), Some(&managed_hooks_dir))
+        });
+
+    let mut changed = false;
+    if local_points_to_managed {
+        if let Some(restored_hooks_path) = restored_local_hooks {
+            changed |= set_hooks_path_in_config(
+                &local_config_path,
+                gix_config::Source::Local,
+                &restored_hooks_path.to_string_lossy(),
+                dry_run,
+            )?;
+        } else {
+            changed |= unset_hooks_path_in_local_config(repo, dry_run)?;
+        }
+    }
+
+    if managed_hooks_dir.exists() || managed_hooks_dir.symlink_metadata().is_ok() {
+        changed = true;
+        if !dry_run {
+            remove_hook_entry(&managed_hooks_dir)?;
+        }
+    }
+
+    changed |= delete_state_file(&state_path, dry_run)?;
+    changed |= delete_state_file(&enablement_path, dry_run)?;
+    changed |= delete_state_file(&rebase_state_path, dry_run)?;
+
+    Ok(RemoveRepoHooksReport {
         changed,
         managed_hooks_path: managed_hooks_dir,
     })
@@ -2513,6 +2605,155 @@ mod tests {
         assert!(
             state.original_local_hooks_path.is_none(),
             "original local hooks path should be empty when local hooksPath was unset"
+        );
+    }
+
+    #[test]
+    fn remove_repo_hooks_restores_preexisting_local_hooks_path() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let repo = init_repo(&tmp.path().join("repo"));
+        let user_hooks = tmp.path().join("user-hooks");
+        fs::create_dir_all(&user_hooks).expect("failed to create user hooks dir");
+
+        let local_config = repo.path().join("config");
+        set_hooks_path_in_config(
+            &local_config,
+            gix_config::Source::Local,
+            &user_hooks.to_string_lossy(),
+            false,
+        )
+        .expect("failed to set preexisting hooksPath");
+
+        ensure_repo_hooks_installed(&repo, false).expect("ensure should succeed");
+        mark_repo_hooks_enabled(&repo).expect("opt-in marker should be writable");
+
+        let remove_report =
+            remove_repo_hooks(&repo, false).expect("remove repo hooks should succeed");
+        assert!(remove_report.changed, "remove should report changes");
+
+        let restored = read_hooks_path_from_config(&local_config, gix_config::Source::Local)
+            .expect("local hooksPath should be restored");
+        assert_eq!(
+            normalize_path(Path::new(restored.trim())),
+            normalize_path(&user_hooks),
+            "local hooksPath should be restored to pre-ensure value"
+        );
+
+        let managed_hooks_dir = managed_git_hooks_dir_for_repo(&repo);
+        assert!(
+            !managed_hooks_dir.exists() && managed_hooks_dir.symlink_metadata().is_err(),
+            "managed hooks directory should be removed"
+        );
+
+        let state_path = repo_state_path(&repo);
+        assert!(
+            !state_path.exists(),
+            "repo hook state should be removed during remove"
+        );
+
+        let marker_path = repo_enablement_path(&repo);
+        assert!(
+            !marker_path.exists() && marker_path.symlink_metadata().is_err(),
+            "repo hook opt-in marker should be removed during remove"
+        );
+    }
+
+    #[test]
+    fn remove_repo_hooks_unsets_local_hooks_path_when_no_original_value() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let repo = init_repo(&tmp.path().join("repo"));
+        let local_config = repo.path().join("config");
+
+        ensure_repo_hooks_installed(&repo, false).expect("ensure should succeed");
+        assert!(
+            read_hooks_path_from_config(&local_config, gix_config::Source::Local).is_some(),
+            "ensure should set local hooksPath"
+        );
+
+        let remove_report =
+            remove_repo_hooks(&repo, false).expect("remove repo hooks should succeed");
+        assert!(remove_report.changed, "remove should report changes");
+        assert!(
+            read_hooks_path_from_config(&local_config, gix_config::Source::Local).is_none(),
+            "local hooksPath should be unset when there is no pre-ensure value"
+        );
+    }
+
+    #[test]
+    fn remove_repo_hooks_does_not_clobber_non_managed_current_hooks_path() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let repo = init_repo(&tmp.path().join("repo"));
+        let original_hooks = tmp.path().join("original-hooks");
+        let replacement_hooks = tmp.path().join("replacement-hooks");
+        fs::create_dir_all(&original_hooks).expect("failed to create original hooks dir");
+        fs::create_dir_all(&replacement_hooks).expect("failed to create replacement hooks dir");
+
+        let local_config = repo.path().join("config");
+        set_hooks_path_in_config(
+            &local_config,
+            gix_config::Source::Local,
+            &original_hooks.to_string_lossy(),
+            false,
+        )
+        .expect("failed to set original hooksPath");
+
+        ensure_repo_hooks_installed(&repo, false).expect("ensure should succeed");
+        set_hooks_path_in_config(
+            &local_config,
+            gix_config::Source::Local,
+            &replacement_hooks.to_string_lossy(),
+            false,
+        )
+        .expect("failed to update hooksPath after ensure");
+
+        remove_repo_hooks(&repo, false).expect("remove repo hooks should succeed");
+
+        let local_hooks = read_hooks_path_from_config(&local_config, gix_config::Source::Local)
+            .expect("replacement hooksPath should be preserved");
+        assert_eq!(
+            normalize_path(Path::new(local_hooks.trim())),
+            normalize_path(&replacement_hooks),
+            "remove should not overwrite non-managed current hooksPath"
+        );
+    }
+
+    #[test]
+    fn remove_repo_hooks_ignores_unexpected_managed_path_from_state() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let repo = init_repo(&tmp.path().join("repo"));
+        let repo_ai_dir = repo.path().join("ai");
+        let survivor_file = repo_ai_dir.join("working_logs").join("survivor.json");
+        fs::create_dir_all(
+            survivor_file
+                .parent()
+                .expect("survivor file should have a parent"),
+        )
+        .expect("failed to create working_logs dir");
+        fs::write(&survivor_file, b"{\"ok\":true}\n").expect("failed to create survivor file");
+
+        ensure_repo_hooks_installed(&repo, false).expect("ensure should succeed");
+        mark_repo_hooks_enabled(&repo).expect("opt-in marker should be writable");
+
+        let poisoned_state = RepoHookState {
+            schema_version: repo_hook_state_schema_version(),
+            managed_hooks_path: repo_ai_dir.to_string_lossy().to_string(),
+            original_local_hooks_path: None,
+            forward_mode: ForwardMode::None,
+            forward_hooks_path: None,
+            binary_path: "git-ai".to_string(),
+        };
+        save_repo_hook_state(&repo_state_path(&repo), &poisoned_state, false)
+            .expect("failed to write poisoned state");
+
+        remove_repo_hooks(&repo, false).expect("remove repo hooks should succeed");
+
+        assert!(
+            survivor_file.exists(),
+            "remove should not delete unrelated files under .git/ai"
+        );
+        assert!(
+            !managed_git_hooks_dir_for_repo(&repo).exists(),
+            "managed hooks dir should still be removed"
         );
     }
 

@@ -400,46 +400,6 @@ mod tests {
         }
     }
 
-    fn with_temp_home_and_fake_code_cli<F: FnOnce(&Path)>(f: F) {
-        with_temp_home(|home| {
-            let bin_dir = home.join("bin");
-            fs::create_dir_all(&bin_dir).unwrap();
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-
-                let code_path = bin_dir.join("code");
-                fs::write(&code_path, "#!/bin/sh\necho 1.200.0\n").unwrap();
-                let mut perms = fs::metadata(&code_path).unwrap().permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&code_path, perms).unwrap();
-            }
-
-            #[cfg(windows)]
-            {
-                let code_path = bin_dir.join("code.cmd");
-                fs::write(&code_path, "@echo off\r\necho 1.200.0\r\n").unwrap();
-            }
-
-            let prev_path = std::env::var_os("PATH");
-            // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
-            unsafe {
-                std::env::set_var("PATH", &bin_dir);
-            }
-
-            f(home);
-
-            // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
-            unsafe {
-                match prev_path {
-                    Some(v) => std::env::set_var("PATH", v),
-                    None => std::env::remove_var("PATH"),
-                }
-            }
-        });
-    }
-
     #[test]
     fn test_github_copilot_installer_name() {
         let installer = GitHubCopilotInstaller;
@@ -592,7 +552,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_check_hooks_partial_pre_tool_use_counts_as_installed() {
-        with_temp_home_and_fake_code_cli(|home| {
+        with_temp_home(|home| {
             let hooks_path = home.join(".github").join("hooks").join("git-ai.json");
             fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
             let existing = json!({
@@ -626,7 +586,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_check_hooks_partial_post_tool_use_counts_as_installed() {
-        with_temp_home_and_fake_code_cli(|home| {
+        with_temp_home(|home| {
             let hooks_path = home.join(".github").join("hooks").join("git-ai.json");
             fs::create_dir_all(hooks_path.parent().unwrap()).unwrap();
             let existing = json!({

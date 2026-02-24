@@ -219,6 +219,7 @@ fn print_help() {
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
     eprintln!("  git-hooks ensure   Ensure repo-local git-ai hooks are installed/healed");
+    eprintln!("  git-hooks remove   Remove repo-local git-ai hooks and restore local hooksPath");
     eprintln!("  ci                 Continuous integration utilities");
     eprintln!("    github                 GitHub CI helpers");
     eprintln!("  squash-authorship  Generate authorship log for squashed commits");
@@ -1087,8 +1088,33 @@ fn handle_git_hooks(args: &[String]) {
                 }
             }
         }
+        Some("remove") | Some("uninstall") => {
+            let repo = match find_repository(&Vec::<String>::new()) {
+                Ok(repo) => repo,
+                Err(e) => {
+                    eprintln!("Failed to find repository: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            match commands::git_hook_handlers::remove_repo_hooks(&repo, false) {
+                Ok(report) => {
+                    let status = if report.changed { "removed" } else { "ok" };
+                    println!(
+                        "repo hooks {}: {}",
+                        status,
+                        report.managed_hooks_path.to_string_lossy()
+                    );
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("Failed to remove repo hooks: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         _ => {
-            eprintln!("Usage: git-ai git-hooks ensure");
+            eprintln!("Usage: git-ai git-hooks <ensure|remove>");
             std::process::exit(1);
         }
     }

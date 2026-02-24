@@ -97,6 +97,145 @@ fn git_hooks_ensure_records_repo_opt_in_marker() {
 
 #[test]
 #[serial]
+fn git_hooks_remove_removes_repo_opt_in_marker() {
+    let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "wrapper");
+    let repo = TestRepo::new();
+    let marker_path = repo
+        .path()
+        .join(".git")
+        .join("ai")
+        .join("git_hooks_enabled");
+    let managed_hooks_dir = repo.path().join(".git").join("ai").join("hooks");
+
+    repo.git_ai(&["git-hooks", "ensure"])
+        .expect("git-hooks ensure should succeed");
+    assert!(
+        marker_path.exists(),
+        "marker should exist after running git-hooks ensure"
+    );
+    assert!(
+        managed_hooks_dir.exists() || managed_hooks_dir.symlink_metadata().is_ok(),
+        "managed hooks should exist after running git-hooks ensure"
+    );
+
+    repo.git_ai(&["git-hooks", "remove"])
+        .expect("git-hooks remove should succeed");
+
+    assert!(
+        !marker_path.exists() && marker_path.symlink_metadata().is_err(),
+        "marker should be removed after running git-hooks remove"
+    );
+    assert!(
+        !managed_hooks_dir.exists() && managed_hooks_dir.symlink_metadata().is_err(),
+        "managed hooks should be removed after running git-hooks remove"
+    );
+}
+
+#[test]
+#[serial]
+fn git_hooks_remove_restores_preexisting_hooks_path_end_to_end() {
+    let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "wrapper");
+    let repo = TestRepo::new();
+
+    let original_hooks_dir = repo.path().join(".git").join("custom-hooks");
+    fs::create_dir_all(&original_hooks_dir).expect("failed to create custom hooks dir");
+    repo.git(&[
+        "config",
+        "--local",
+        "core.hooksPath",
+        original_hooks_dir.to_string_lossy().as_ref(),
+    ])
+    .expect("setting preexisting local hooksPath should succeed");
+
+    let before = repo
+        .git(&["config", "--local", "--get", "core.hooksPath"])
+        .expect("reading preexisting hooksPath should succeed")
+        .trim()
+        .to_string();
+    assert_eq!(
+        before,
+        original_hooks_dir.to_string_lossy(),
+        "sanity check: preexisting hooksPath should match custom hooks dir"
+    );
+
+    repo.git_ai(&["git-hooks", "ensure"])
+        .expect("git-hooks ensure should succeed");
+
+    let managed_hooks_dir = repo.path().join(".git").join("ai").join("hooks");
+    let after_ensure = repo
+        .git(&["config", "--local", "--get", "core.hooksPath"])
+        .expect("reading hooksPath after ensure should succeed")
+        .trim()
+        .to_string();
+    assert_eq!(
+        std::fs::canonicalize(&managed_hooks_dir)
+            .expect("managed hooks dir should exist after ensure"),
+        std::fs::canonicalize(&after_ensure).expect("managed hooks path from config should exist"),
+        "ensure should point core.hooksPath at managed hooks"
+    );
+
+    repo.git_ai(&["git-hooks", "remove"])
+        .expect("git-hooks remove should succeed");
+
+    let after_remove = repo
+        .git(&["config", "--local", "--get", "core.hooksPath"])
+        .expect("hooksPath should still exist and be restored after remove")
+        .trim()
+        .to_string();
+    assert_eq!(
+        std::fs::canonicalize(&after_remove).expect("restored hooksPath should exist"),
+        std::fs::canonicalize(&original_hooks_dir).expect("custom hooks dir should exist"),
+        "remove should restore the original local hooksPath"
+    );
+
+    let marker = repo
+        .path()
+        .join(".git")
+        .join("ai")
+        .join("git_hooks_enabled");
+    let state = repo
+        .path()
+        .join(".git")
+        .join("ai")
+        .join("git_hooks_state.json");
+    assert!(
+        !managed_hooks_dir.exists() && managed_hooks_dir.symlink_metadata().is_err(),
+        "remove should delete managed hooks dir"
+    );
+    assert!(
+        !marker.exists() && marker.symlink_metadata().is_err(),
+        "remove should delete opt-in marker"
+    );
+    assert!(
+        !state.exists() && state.symlink_metadata().is_err(),
+        "remove should delete repo hook state"
+    );
+}
+
+#[test]
+#[serial]
+fn git_hooks_uninstall_alias_works_end_to_end() {
+    let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "wrapper");
+    let repo = TestRepo::new();
+    let managed_hooks_dir = repo.path().join(".git").join("ai").join("hooks");
+
+    repo.git_ai(&["git-hooks", "ensure"])
+        .expect("git-hooks ensure should succeed");
+    assert!(
+        managed_hooks_dir.exists() || managed_hooks_dir.symlink_metadata().is_ok(),
+        "managed hooks should exist after ensure"
+    );
+
+    repo.git_ai(&["git-hooks", "uninstall"])
+        .expect("git-hooks uninstall alias should succeed");
+    assert!(
+        !managed_hooks_dir.exists() && managed_hooks_dir.symlink_metadata().is_err(),
+        "uninstall alias should remove managed hooks"
+    );
+}
+
+#[test]
+#[serial]
 fn hook_mode_runs_without_wrapper() {
     let _mode = EnvVarGuard::set("GIT_AI_TEST_GIT_MODE", "hooks");
 
