@@ -276,6 +276,17 @@ fn path_is_inside_managed_hooks(path: &Path, managed_hooks_dir: &Path) -> bool {
     normalize_path(path).starts_with(normalize_path(managed_hooks_dir))
 }
 
+fn path_looks_like_git_ai_binary(path: &Path) -> bool {
+    let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+        return false;
+    };
+
+    matches!(
+        stem.to_ascii_lowercase().as_str(),
+        "git-ai" | "git_ai" | "git"
+    )
+}
+
 fn resolve_repo_hook_binary_path(
     managed_hooks_dir: &Path,
     prior_state: Option<&RepoHookState>,
@@ -284,6 +295,7 @@ fn resolve_repo_hook_binary_path(
     if let Some(current_exe) = current_exe_path.as_ref()
         && current_exe.exists()
         && !path_is_inside_managed_hooks(current_exe, managed_hooks_dir)
+        && path_looks_like_git_ai_binary(current_exe)
     {
         return current_exe.clone();
     }
@@ -298,7 +310,9 @@ fn resolve_repo_hook_binary_path(
         }
     }
 
-    if let Some(current_exe) = current_exe_path {
+    if let Some(current_exe) = current_exe_path
+        && path_looks_like_git_ai_binary(&current_exe)
+    {
         return current_exe;
     }
 
@@ -3258,6 +3272,39 @@ mod tests {
             normalize_path(&resolved),
             normalize_path(&runtime_binary),
             "runtime binary should be preferred when it is an external, valid path"
+        );
+    }
+
+    #[test]
+    fn resolve_repo_hook_binary_path_ignores_non_git_ai_runtime_binary() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let managed_hooks_dir = tmp.path().join(".git").join("ai").join("hooks");
+        fs::create_dir_all(&managed_hooks_dir).expect("failed to create managed hooks dir");
+
+        let saved_binary = tmp.path().join("bin").join("git-ai");
+        fs::create_dir_all(saved_binary.parent().expect("saved binary parent"))
+            .expect("failed to create saved binary parent");
+        fs::write(&saved_binary, b"saved-binary").expect("failed to write saved binary");
+
+        let runtime_binary = tmp.path().join("runtime").join("test-runner-binary");
+        fs::create_dir_all(runtime_binary.parent().expect("runtime binary parent"))
+            .expect("failed to create runtime binary parent");
+        fs::write(&runtime_binary, b"runtime-binary").expect("failed to write runtime binary");
+
+        let state = RepoHookState {
+            binary_path: saved_binary.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let resolved = resolve_repo_hook_binary_path(
+            &managed_hooks_dir,
+            Some(&state),
+            Some(runtime_binary.clone()),
+        );
+        assert_eq!(
+            normalize_path(&resolved),
+            normalize_path(&saved_binary),
+            "non git-ai runtime binary should not override saved source binary"
         );
     }
 
