@@ -734,7 +734,7 @@ pub fn update_vscode_chat_hook_settings(
     // This is cross-platform (including Windows) because the setting
     // does not accept absolute paths or backslash separators.
     let hook_dir_path = "~/.github/hooks";
-    match hook_locations.get(&hook_dir_path) {
+    match hook_locations.get(hook_dir_path) {
         Some(prop) => {
             let should_update = match prop.value() {
                 Some(node) => match node.as_boolean_lit() {
@@ -750,7 +750,7 @@ pub fn update_vscode_chat_hook_settings(
             }
         }
         None => {
-            hook_locations.append(&hook_dir_path, jsonc_parser::json!(true));
+            hook_locations.append(hook_dir_path, jsonc_parser::json!(true));
             changed = true;
         }
     }
