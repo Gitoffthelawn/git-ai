@@ -195,61 +195,41 @@ fn assert_diff_lines_exact(lines: &[DiffLine], expected: &[(&str, &str, Option<&
 
 fn configure_repo_external_diff_helper(repo: &TestRepo) -> String {
     let marker = "EXTERNAL_DIFF_MARKER";
-    let helper_path = if cfg!(windows) {
-        repo.path().join("ext-diff-helper.cmd")
-    } else {
-        repo.path().join("ext-diff-helper.sh")
-    };
+    let helper_path = repo.path().join("ext-diff-helper.sh");
+    let helper_path_posix = helper_path
+        .to_str()
+        .expect("helper path must be valid UTF-8")
+        .replace('\\', "/");
 
-    if cfg!(windows) {
-        fs::write(&helper_path, format!("@echo {marker}\r\n@exit /b 0\r\n"))
-            .expect("should write external diff helper");
-    } else {
-        fs::write(&helper_path, format!("#!/bin/sh\necho {marker}\nexit 0\n"))
-            .expect("should write external diff helper");
-        #[cfg(unix)]
-        {
-            let mut perms = fs::metadata(&helper_path)
-                .expect("helper metadata should exist")
-                .permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&helper_path, perms).expect("helper should be executable");
-        }
+    fs::write(&helper_path, format!("#!/bin/sh\necho {marker}\nexit 0\n"))
+        .expect("should write external diff helper");
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&helper_path)
+            .expect("helper metadata should exist")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&helper_path, perms).expect("helper should be executable");
     }
 
-    repo.git_og(&[
-        "config",
-        "diff.external",
-        helper_path
-            .to_str()
-            .expect("helper path must be valid UTF-8"),
-    ])
-    .expect("configuring diff.external should succeed");
+    repo.git_og(&["config", "diff.external", &helper_path_posix])
+        .expect("configuring diff.external should succeed");
 
     marker.to_string()
 }
 
 fn create_external_diff_helper_script(repo: &TestRepo, marker: &str) -> std::path::PathBuf {
-    let helper_path = if cfg!(windows) {
-        repo.path().join(format!("ext-env-helper-{marker}.cmd"))
-    } else {
-        repo.path().join(format!("ext-env-helper-{marker}.sh"))
-    };
+    let helper_path = repo.path().join(format!("ext-env-helper-{marker}.sh"));
 
-    if cfg!(windows) {
-        fs::write(&helper_path, format!("@echo {marker}\r\n@exit /b 0\r\n"))
-            .expect("should write external diff helper");
-    } else {
-        fs::write(&helper_path, format!("#!/bin/sh\necho {marker}\nexit 0\n"))
-            .expect("should write external diff helper");
-        #[cfg(unix)]
-        {
-            let mut perms = fs::metadata(&helper_path)
-                .expect("helper metadata should exist")
-                .permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&helper_path, perms).expect("helper should be executable");
-        }
+    fs::write(&helper_path, format!("#!/bin/sh\necho {marker}\nexit 0\n"))
+        .expect("should write external diff helper");
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(&helper_path)
+            .expect("helper metadata should exist")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&helper_path, perms).expect("helper should be executable");
     }
 
     helper_path
@@ -943,6 +923,7 @@ fn test_diff_ignores_git_external_diff_env_but_proxy_uses_it() {
     let helper_path_str = helper_path
         .to_str()
         .expect("helper path must be valid UTF-8")
+        .replace('\\', "/")
         .to_string();
 
     let proxied = repo
