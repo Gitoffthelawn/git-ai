@@ -51,9 +51,7 @@ fn test_cwd_different_from_repo_root_single_repo() {
     // Set up initial commit in the target repo
     let mut readme = repo_target.filename("README.md");
     readme.set_contents(lines!["# Target Repo"]);
-    repo_target
-        .stage_all_and_commit("initial commit")
-        .unwrap();
+    repo_target.stage_all_and_commit("initial commit").unwrap();
 
     // Write AI content to a file in the target repo
     fs::write(
@@ -82,9 +80,7 @@ fn test_cwd_different_from_repo_root_single_repo() {
     );
 
     // Commit in the target repo
-    let commit = repo_target
-        .stage_all_and_commit("add AI feature")
-        .unwrap();
+    let commit = repo_target.stage_all_and_commit("add AI feature").unwrap();
 
     // Verify AI attribution is present
     assert!(
@@ -188,21 +184,9 @@ fn test_cwd_is_one_of_edited_repos_plus_others() {
     repo_other2.stage_all_and_commit("initial commit").unwrap();
 
     // Write AI content in all three repos (including the CWD repo)
-    fs::write(
-        repo_cwd.path().join("cwd_file.txt"),
-        "AI in CWD repo\n",
-    )
-    .unwrap();
-    fs::write(
-        repo_other1.path().join("other1.txt"),
-        "AI in other1\n",
-    )
-    .unwrap();
-    fs::write(
-        repo_other2.path().join("other2.txt"),
-        "AI in other2\n",
-    )
-    .unwrap();
+    fs::write(repo_cwd.path().join("cwd_file.txt"), "AI in CWD repo\n").unwrap();
+    fs::write(repo_other1.path().join("other1.txt"), "AI in other1\n").unwrap();
+    fs::write(repo_other2.path().join("other2.txt"), "AI in other2\n").unwrap();
 
     let file_cwd = repo_cwd.canonical_path().join("cwd_file.txt");
     let file_o1 = repo_other1.canonical_path().join("other1.txt");
@@ -223,7 +207,9 @@ fn test_cwd_is_one_of_edited_repos_plus_others() {
         .expect("checkpoint from CWD repo with cross-repo files should succeed");
 
     // Verify the CWD repo has attribution (it is also a target)
-    let commit_cwd = repo_cwd.stage_all_and_commit("AI edits in CWD repo").unwrap();
+    let commit_cwd = repo_cwd
+        .stage_all_and_commit("AI edits in CWD repo")
+        .unwrap();
     assert!(
         !commit_cwd.authorship_log.attestations.is_empty(),
         "Scenario 3: CWD repo should have AI attestations when it is also one of the \
@@ -271,7 +257,11 @@ fn test_cwd_is_parent_dir_above_repos_single_repo() {
     repo.stage_all_and_commit("initial commit").unwrap();
 
     // Write AI content
-    fs::write(repo_path.join("alpha.txt"), "AI alpha line 1\nAI alpha line 2\n").unwrap();
+    fs::write(
+        repo_path.join("alpha.txt"),
+        "AI alpha line 1\nAI alpha line 2\n",
+    )
+    .unwrap();
 
     let file_abs = repo.canonical_path().join("alpha.txt");
 
@@ -291,7 +281,9 @@ fn test_cwd_is_parent_dir_above_repos_single_repo() {
     );
 
     // Commit and verify
-    let commit = repo.stage_all_and_commit("AI edits from parent CWD").unwrap();
+    let commit = repo
+        .stage_all_and_commit("AI edits from parent CWD")
+        .unwrap();
     assert!(
         !commit.authorship_log.attestations.is_empty(),
         "Scenario 4: AI edits should be attributed correctly when the agent's CWD is \
@@ -394,7 +386,11 @@ fn test_cwd_parent_dir_edits_in_repo_subpaths() {
     fs::write(repo_y_path.join("lib").join("utils.py"), "AI utils code\n").unwrap();
 
     fs::create_dir_all(repo_z_path.join("pkg").join("api")).unwrap();
-    fs::write(repo_z_path.join("pkg").join("api").join("handler.go"), "AI handler code\n").unwrap();
+    fs::write(
+        repo_z_path.join("pkg").join("api").join("handler.go"),
+        "AI handler code\n",
+    )
+    .unwrap();
 
     let file_x = repo_x
         .canonical_path()
@@ -420,9 +416,7 @@ fn test_cwd_parent_dir_edits_in_repo_subpaths() {
                 file_z.to_str().unwrap(),
             ],
         )
-        .expect(
-            "checkpoint from parent directory with files in repo subpaths should succeed",
-        );
+        .expect("checkpoint from parent directory with files in repo subpaths should succeed");
 
     // Verify attribution in each repo
     let commit_x = repo_x.stage_all_and_commit("AI edits in X").unwrap();
@@ -530,10 +524,14 @@ fn test_cwd_parent_dir_multiple_files_per_repo_subpaths() {
                 be_file2.to_str().unwrap(),
             ],
         )
-        .expect("checkpoint from parent with multiple files in multiple repo subpaths should succeed");
+        .expect(
+            "checkpoint from parent with multiple files in multiple repo subpaths should succeed",
+        );
 
     // Verify frontend repo attribution
-    let commit_fe = repo_fe.stage_all_and_commit("AI edits in frontend").unwrap();
+    let commit_fe = repo_fe
+        .stage_all_and_commit("AI edits in frontend")
+        .unwrap();
     assert!(
         !commit_fe.authorship_log.attestations.is_empty(),
         "Scenario 5 (multi-file): frontend repo should have AI attestations."
@@ -631,16 +629,8 @@ fn test_parent_cwd_blame_correct_across_repos() {
     repo_b.stage_all_and_commit("initial B").unwrap();
 
     // Write mixed content (human + AI appended)
-    fs::write(
-        repo_a_path.join("code.txt"),
-        "Human A1\nHuman A2\nAI A3\n",
-    )
-    .unwrap();
-    fs::write(
-        repo_b_path.join("code.txt"),
-        "Human B1\nAI B2\nAI B3\n",
-    )
-    .unwrap();
+    fs::write(repo_a_path.join("code.txt"), "Human A1\nHuman A2\nAI A3\n").unwrap();
+    fs::write(repo_b_path.join("code.txt"), "Human B1\nAI B2\nAI B3\n").unwrap();
 
     let abs_a = repo_a.canonical_path().join("code.txt");
     let abs_b = repo_b.canonical_path().join("code.txt");
@@ -664,19 +654,11 @@ fn test_parent_cwd_blame_correct_across_repos() {
 
     // Verify blame in repo_a
     let mut blamed_a = repo_a.filename("code.txt");
-    blamed_a.assert_lines_and_blame(vec![
-        "Human A1".human(),
-        "Human A2".human(),
-        "AI A3".ai(),
-    ]);
+    blamed_a.assert_lines_and_blame(vec!["Human A1".human(), "Human A2".human(), "AI A3".ai()]);
 
     // Verify blame in repo_b
     let mut blamed_b = repo_b.filename("code.txt");
-    blamed_b.assert_lines_and_blame(vec![
-        "Human B1".human(),
-        "AI B2".ai(),
-        "AI B3".ai(),
-    ]);
+    blamed_b.assert_lines_and_blame(vec!["Human B1".human(), "AI B2".ai(), "AI B3".ai()]);
 
     let _ = fs::remove_dir_all(&workspace);
 }
