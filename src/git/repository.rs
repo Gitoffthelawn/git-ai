@@ -91,6 +91,48 @@ fn args_with_disabled_hooks_if_needed(args: &[String]) -> Vec<String> {
     out
 }
 
+fn first_git_subcommand_index(args: &[String]) -> Option<usize> {
+    let mut index = 0usize;
+
+    while index < args.len() {
+        let arg = &args[index];
+
+        if !arg.starts_with('-') {
+            return Some(index);
+        }
+
+        let takes_value = matches!(
+            arg.as_str(),
+            "-C" | "-c"
+                | "--git-dir"
+                | "--work-tree"
+                | "--namespace"
+                | "--super-prefix"
+                | "--config-env"
+        );
+
+        index += if takes_value { 2 } else { 1 };
+    }
+
+    None
+}
+
+fn args_with_no_external_diff_for_internal_diff(args: &[String]) -> Vec<String> {
+    let Some(command_index) = first_git_subcommand_index(args) else {
+        return args.to_vec();
+    };
+
+    if args[command_index] != "diff" || args.iter().any(|arg| arg == "--no-ext-diff") {
+        return args.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(args.len() + 1);
+    out.extend(args[..=command_index].iter().cloned());
+    out.push("--no-ext-diff".to_string());
+    out.extend(args[command_index + 1..].iter().cloned());
+    out
+}
+
 pub struct Object<'a> {
     repo: &'a Repository,
     oid: String,
@@ -2288,9 +2330,12 @@ pub fn group_files_by_repository(
 /// Helper to execute a git command
 pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
-    let effective_args = args_with_disabled_hooks_if_needed(args);
+    let effective_args =
+        args_with_no_external_diff_for_internal_diff(&args_with_disabled_hooks_if_needed(args));
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args);
+    cmd.env_remove("GIT_EXTERNAL_DIFF");
+    cmd.env_remove("GIT_DIFF_OPTS");
 
     #[cfg(windows)]
     {
@@ -2317,12 +2362,15 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
 /// Helper to execute a git command with data provided on stdin
 pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
-    let effective_args = args_with_disabled_hooks_if_needed(args);
+    let effective_args =
+        args_with_no_external_diff_for_internal_diff(&args_with_disabled_hooks_if_needed(args));
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    cmd.env_remove("GIT_EXTERNAL_DIFF");
+    cmd.env_remove("GIT_DIFF_OPTS");
 
     #[cfg(windows)]
     {
@@ -2363,7 +2411,8 @@ pub fn exec_git_stdin_with_env(
     stdin_data: &[u8],
 ) -> Result<Output, GitAiError> {
     // TODO Make sure to handle process signals, etc.
-    let effective_args = args_with_disabled_hooks_if_needed(args);
+    let effective_args =
+        args_with_no_external_diff_for_internal_diff(&args_with_disabled_hooks_if_needed(args));
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args)
         .stdin(std::process::Stdio::piped())
@@ -2374,6 +2423,8 @@ pub fn exec_git_stdin_with_env(
     for (k, v) in env.iter() {
         cmd.env(k, v);
     }
+    cmd.env_remove("GIT_EXTERNAL_DIFF");
+    cmd.env_remove("GIT_DIFF_OPTS");
 
     #[cfg(windows)]
     {
@@ -2716,6 +2767,27 @@ mod tests {
 
         assert_eq!(forwarded[0], "-c");
         assert!(forwarded[1].starts_with("core.hooksPath="));
+    }
+
+    #[test]
+    fn internal_git_diff_commands_disable_external_diff_by_default() {
+        let args = vec!["diff".to_string(), "HEAD^".to_string(), "HEAD".to_string()];
+        let rewritten = args_with_no_external_diff_for_internal_diff(&args);
+
+        assert_eq!(rewritten[0], "diff");
+        assert_eq!(rewritten[1], "--no-ext-diff");
+        assert_eq!(rewritten[2], "HEAD^");
+    }
+
+    #[test]
+    fn non_diff_commands_are_unchanged_by_no_external_diff_rewrite() {
+        let args = vec![
+            "status".to_string(),
+            "--porcelain=v2".to_string(),
+            "HEAD".to_string(),
+        ];
+        let rewritten = args_with_no_external_diff_for_internal_diff(&args);
+        assert_eq!(rewritten, args);
     }
 
     #[test]
