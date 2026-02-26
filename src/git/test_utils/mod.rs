@@ -262,24 +262,40 @@ impl TmpFile {
 
 /// Initialise a shared test git configuration exactly once for the process.
 ///
-/// Sets GIT_CONFIG_NOSYSTEM=1 and GIT_CONFIG_GLOBAL to a single empty file so
-/// that parallel tests never contend on the real system / global config files.
-/// On Windows CI this prevents "fatal: unknown error occurred while reading the
-/// configuration files" when many git subprocesses are spawned simultaneously.
+/// Points GIT_CONFIG_GLOBAL at a single stable file so that parallel tests
+/// never contend on the real user-level gitconfig (e.g. ~/.gitconfig on Linux/
+/// macOS or %USERPROFILE%\.gitconfig on Windows).  On Windows CI the user
+/// gitconfig is occasionally locked by antivirus scanners, producing the
+/// otherwise-mysterious "fatal: unknown error occurred while reading the
+/// configuration files" failure.
 ///
-/// Using OnceLock means the env vars are written exactly once; no concurrent
+/// We deliberately do NOT set GIT_CONFIG_NOSYSTEM: the system gitconfig on
+/// Windows typically contains core.autocrlf=true, and skipping it causes git
+/// to detect spurious line-ending differences as "local changes", which then
+/// aborts cherry-pick operations in tests.
+///
+/// The path is canonicalised before being stored so that macOS CI (where
+/// std::env::temp_dir returns a symlinked /var/folders/… path) hands git a
+/// real /private/var/folders/… path it can open without issue.
+///
+/// Using OnceLock means the env var is written exactly once; no concurrent
 /// writes can race, satisfying the safety requirement of set_var in tests.
 pub fn init_test_git_config() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
         let path = std::env::temp_dir().join("git-ai-test-global-gitconfig");
-        let _ = fs::write(&path, "");
+        let _ = fs::write(
+            &path,
+            "[user]\n\tname = Test User\n\temail = test@example.com\n",
+        );
+        // Resolve symlinks so that git (on macOS) receives a real path rather
+        // than a /var/folders/… symlink that some git versions cannot open.
+        let canonical = path.canonicalize().unwrap_or(path);
         // SAFETY: OnceLock guarantees this closure runs exactly once across all
-        // parallel test threads, so no concurrent mutations of the env vars are
+        // parallel test threads, so no concurrent mutations of the env var are
         // possible here.
         unsafe {
-            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-            std::env::set_var("GIT_CONFIG_GLOBAL", &path);
+            std::env::set_var("GIT_CONFIG_GLOBAL", &canonical);
         }
     });
 }
