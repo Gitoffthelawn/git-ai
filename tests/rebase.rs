@@ -1476,6 +1476,10 @@ reuse_tests_in_worktree!(
     test_rebase_exec,
     test_rebase_preserve_merges,
     test_rebase_commit_splitting,
+);
+
+reuse_tests_in_worktree_with_attrs!(
+    (#[cfg(not(target_os = "windows"))])
     test_rebase_squash_preserves_all_authorship,
     test_rebase_reword_commit_with_children,
 );
