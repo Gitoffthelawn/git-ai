@@ -173,7 +173,19 @@ fn wrapper_path() -> String {
 fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
     let gt_path =
         find_gt_binary().expect("gt binary not found; require_gt! should have been called");
+
+    // On Windows, npm installs `gt` as `gt.cmd` (a batch wrapper). Rust's
+    // Command cannot execute `.cmd` files directly — they must be run through
+    // `cmd.exe /C`. On Unix, we invoke the binary directly.
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = Command::new("cmd");
+        c.args(["/C", gt_path]);
+        c
+    };
+    #[cfg(not(windows))]
     let mut command = Command::new(gt_path);
+
     command
         .current_dir(repo.path())
         .args(args)
