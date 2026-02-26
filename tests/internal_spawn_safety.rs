@@ -109,7 +109,7 @@ fn direct_git_command_spawns_are_centralized() {
     let pattern = Regex::new(r#"Command::new\(config::Config::get\(\)\.git_cmd\(\)\)"#).unwrap();
 
     for file in files {
-        let file_str = file.to_string_lossy();
+        let file_str = file.to_string_lossy().replace('\\', "/");
         if allowed_suffixes
             .iter()
             .any(|suffix| file_str.ends_with(suffix))
