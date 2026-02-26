@@ -145,6 +145,8 @@ fn strip_profile_conflicts(args: Vec<String>, profile: InternalGitProfile) -> Ve
                     || arg == "--color"
                     || arg.starts_with("--color=")
                     || arg == "--no-prefix"
+                    || arg == "--src-prefix"
+                    || arg == "--dst-prefix"
                     || arg.starts_with("--src-prefix=")
                     || arg.starts_with("--dst-prefix=")
                     || arg.starts_with("--diff-algorithm=")
@@ -189,9 +191,24 @@ fn strip_profile_conflicts(args: Vec<String>, profile: InternalGitProfile) -> Ve
             return out;
         }
 
-        if !should_drop(&args[index]) {
+        let drop_current = should_drop(&args[index]);
+        if !drop_current {
             out.push(args[index].clone());
+            index += 1;
+            continue;
         }
+
+        // Handle split-arg forms we intentionally strip (e.g. --src-prefix X).
+        if matches!(profile, InternalGitProfile::PatchParse)
+            && (args[index] == "--src-prefix" || args[index] == "--dst-prefix")
+        {
+            index += 1;
+            if index < args.len() && args[index] != "--" {
+                index += 1;
+            }
+            continue;
+        }
+
         index += 1;
     }
 
@@ -204,7 +221,8 @@ fn profile_options(profile: InternalGitProfile) -> &'static [&'static str] {
         InternalGitProfile::PatchParse => &[
             "--no-ext-diff",
             "--no-textconv",
-            "--default-prefix",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             "--no-relative",
             "--no-color",
             "--diff-algorithm=default",
@@ -2885,7 +2903,8 @@ mod tests {
 
         assert!(rewritten.iter().any(|arg| arg == "--no-ext-diff"));
         assert!(rewritten.iter().any(|arg| arg == "--no-textconv"));
-        assert!(rewritten.iter().any(|arg| arg == "--default-prefix"));
+        assert!(rewritten.iter().any(|arg| arg == "--src-prefix=a/"));
+        assert!(rewritten.iter().any(|arg| arg == "--dst-prefix=b/"));
         assert!(rewritten.iter().any(|arg| arg == "--no-relative"));
         assert!(rewritten.iter().any(|arg| arg == "--no-color"));
         assert!(
@@ -2952,6 +2971,27 @@ mod tests {
         assert!(!rewritten.iter().any(|arg| arg == "--ext-diff"));
         assert!(!rewritten.iter().any(|arg| arg.starts_with("--color")));
         assert!(rewritten.iter().any(|arg| arg == "--no-color"));
+    }
+
+    #[test]
+    fn patch_profile_strips_split_prefix_args() {
+        let args = vec![
+            "diff".to_string(),
+            "--src-prefix".to_string(),
+            "SRC/".to_string(),
+            "--dst-prefix".to_string(),
+            "DST/".to_string(),
+            "HEAD^".to_string(),
+            "HEAD".to_string(),
+        ];
+        let rewritten = args_with_internal_git_profile(&args, InternalGitProfile::PatchParse);
+
+        assert!(!rewritten.iter().any(|arg| arg == "--src-prefix"));
+        assert!(!rewritten.iter().any(|arg| arg == "--dst-prefix"));
+        assert!(!rewritten.iter().any(|arg| arg == "SRC/"));
+        assert!(!rewritten.iter().any(|arg| arg == "DST/"));
+        assert!(rewritten.iter().any(|arg| arg == "--src-prefix=a/"));
+        assert!(rewritten.iter().any(|arg| arg == "--dst-prefix=b/"));
     }
 
     #[test]
