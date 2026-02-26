@@ -288,6 +288,20 @@ impl TmpRepo {
 
         println!("tmp_dir: {:?}", tmp_dir);
 
+        // Write a per-test empty global gitconfig and point git at it so that
+        // parallel tests do not contend on the real system/global config files.
+        // On Windows CI this prevents "unknown error occurred while reading the
+        // configuration files" when multiple tests run git commands simultaneously.
+        // This mirrors the GIT_AI_TEST_DB_PATH pattern above: the last writer
+        // wins but every value is a valid, readable, unlocked file.
+        let isolated_global_config = tmp_dir.join(".gitconfig");
+        fs::write(&isolated_global_config, "").map_err(GitAiError::IoError)?;
+        // SAFETY: test-only code; same pattern as GIT_AI_TEST_DB_PATH above.
+        unsafe {
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+            std::env::set_var("GIT_CONFIG_GLOBAL", &isolated_global_config);
+        }
+
         // Initialize git repository
         let repo_git2 = Repository::init(&tmp_dir)?;
 
