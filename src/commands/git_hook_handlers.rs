@@ -276,11 +276,32 @@ fn path_is_inside_managed_hooks(path: &Path, managed_hooks_dir: &Path) -> bool {
     normalize_path(path).starts_with(normalize_path(managed_hooks_dir))
 }
 
+fn path_looks_like_git_ai_binary(path: &Path) -> bool {
+    let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+        return false;
+    };
+
+    let stem = stem.to_ascii_lowercase();
+    stem == "git"
+        || stem == "git-ai"
+        || stem == "git_ai"
+        || stem.starts_with("git-ai-")
+        || stem.starts_with("git_ai-")
+}
+
 fn resolve_repo_hook_binary_path(
     managed_hooks_dir: &Path,
     prior_state: Option<&RepoHookState>,
     current_exe_path: Option<PathBuf>,
 ) -> PathBuf {
+    if let Some(current_exe) = current_exe_path.as_ref()
+        && current_exe.exists()
+        && !path_is_inside_managed_hooks(current_exe, managed_hooks_dir)
+        && path_looks_like_git_ai_binary(current_exe)
+    {
+        return current_exe.clone();
+    }
+
     if let Some(saved_path) = prior_state
         .map(|state| state.binary_path.trim())
         .filter(|path| !path.is_empty())
@@ -291,14 +312,9 @@ fn resolve_repo_hook_binary_path(
         }
     }
 
-    if let Some(current_exe) = current_exe_path.as_ref()
-        && current_exe.exists()
-        && !path_is_inside_managed_hooks(current_exe, managed_hooks_dir)
+    if let Some(current_exe) = current_exe_path
+        && path_looks_like_git_ai_binary(&current_exe)
     {
-        return current_exe.clone();
-    }
-
-    if let Some(current_exe) = current_exe_path {
         return current_exe;
     }
 
@@ -511,18 +527,44 @@ fn ensure_hook_entry_installed(
         };
 
         #[cfg(windows)]
-        let should_replace = {
-            let metadata = hook_path.symlink_metadata()?;
-            if metadata.file_type().is_file() {
-                !files_match_by_content(hook_path, binary_path)?
-            } else {
-                true
+        let should_replace = match should_replace_windows_hook_entry(hook_path, binary_path) {
+            Ok(should_replace) => should_replace,
+            Err(err) => {
+                if let GitAiError::IoError(io_err) = &err
+                    && is_windows_lock_or_sharing_violation(io_err)
+                {
+                    debug_log(&format!(
+                        "Deferring repo hook refresh for {} because it is currently in use",
+                        hook_path.display()
+                    ));
+                    return Ok(false);
+                }
+                return Err(err);
             }
         };
 
         if should_replace {
             if !dry_run {
-                remove_hook_entry(hook_path)?;
+                #[cfg(windows)]
+                {
+                    if let Err(err) = remove_hook_entry(hook_path) {
+                        if let GitAiError::IoError(io_err) = &err
+                            && is_windows_lock_or_sharing_violation(io_err)
+                        {
+                            debug_log(&format!(
+                                "Deferring repo hook refresh for {} because it is currently in use",
+                                hook_path.display()
+                            ));
+                            return Ok(false);
+                        }
+                        return Err(err);
+                    }
+                }
+
+                #[cfg(not(windows))]
+                {
+                    remove_hook_entry(hook_path)?;
+                }
             }
         } else {
             return Ok(false);
@@ -530,10 +572,77 @@ fn ensure_hook_entry_installed(
     }
 
     if !dry_run {
-        install_hook_entry(binary_path, hook_path)?;
+        #[cfg(windows)]
+        {
+            if let Err(err) = install_hook_entry(binary_path, hook_path) {
+                if let GitAiError::IoError(io_err) = &err
+                    && is_windows_lock_or_sharing_violation(io_err)
+                {
+                    // Defer only when an existing destination is still present/locked.
+                    // If no hook file exists here, surfacing the error is safer than silently
+                    // leaving the hook missing.
+                    if hook_path.exists() || hook_path.symlink_metadata().is_ok() {
+                        debug_log(&format!(
+                            "Deferring repo hook refresh for {} because it is currently in use",
+                            hook_path.display()
+                        ));
+                        return Ok(false);
+                    }
+                }
+                return Err(err);
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            install_hook_entry(binary_path, hook_path)?;
+        }
     }
 
     Ok(true)
+}
+
+#[cfg(windows)]
+fn should_replace_windows_hook_entry(
+    hook_path: &Path,
+    binary_path: &Path,
+) -> Result<bool, GitAiError> {
+    let hook_metadata = hook_path.symlink_metadata()?;
+    if !hook_metadata.file_type().is_file() {
+        return Ok(true);
+    }
+
+    let source_metadata = fs::metadata(binary_path)?;
+    if !source_metadata.file_type().is_file() {
+        return Ok(true);
+    }
+
+    // Length mismatch is always stale.
+    if hook_metadata.len() != source_metadata.len() {
+        return Ok(true);
+    }
+
+    let hook_modified = hook_metadata.modified().ok();
+    let source_modified = source_metadata.modified().ok();
+
+    match (hook_modified, source_modified) {
+        (Some(hook_ts), Some(source_ts)) if hook_ts < source_ts => Ok(true),
+        // If hook appears newer (clock skew, timestamp granularity), verify bytes before skipping.
+        (Some(hook_ts), Some(source_ts)) if hook_ts > source_ts => {
+            Ok(!files_match_by_content(hook_path, binary_path)?)
+        }
+        // Equal timestamps are ambiguous on filesystems with coarse timestamp precision.
+        _ => Ok(!files_match_by_content(hook_path, binary_path)?),
+    }
+}
+
+#[cfg(windows)]
+fn is_windows_lock_or_sharing_violation(io_err: &std::io::Error) -> bool {
+    if let Some(code) = io_err.raw_os_error() {
+        return matches!(code, 5 | 32 | 33);
+    }
+
+    io_err.kind() == std::io::ErrorKind::PermissionDenied
 }
 
 fn remove_hook_entry(hook_path: &Path) -> Result<(), GitAiError> {
@@ -2485,12 +2594,26 @@ mod tests {
 
     fn init_repo(path: &Path) -> Repository {
         fs::create_dir_all(path).expect("failed to create repo dir");
+        let isolated_home = path.join(".git-ai-test-home");
+        fs::create_dir_all(&isolated_home).expect("failed to create isolated HOME for git init");
+        let isolated_global_config = isolated_home.join(".gitconfig");
+        fs::write(&isolated_global_config, "").expect("failed to create isolated global config");
+
         let init = Command::new("git")
             .args(["init", "."])
             .current_dir(path)
+            .env("HOME", &isolated_home)
+            .env("USERPROFILE", &isolated_home)
+            .env("GIT_CONFIG_GLOBAL", &isolated_global_config)
             .output()
             .expect("failed to run git init");
-        assert!(init.status.success(), "git init should succeed");
+        assert!(
+            init.status.success(),
+            "git init should succeed (status={:?}, stdout={}, stderr={})",
+            init.status.code(),
+            String::from_utf8_lossy(&init.stdout),
+            String::from_utf8_lossy(&init.stderr)
+        );
         crate::git::find_repository_in_path(&path.to_string_lossy())
             .expect("failed to open initialized repo")
     }
@@ -3074,7 +3197,9 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn ensure_hook_entry_install_updates_copied_binary_when_source_changes() {
+    fn ensure_hook_entry_install_updates_copied_binary_when_source_is_newer() {
+        use filetime::{FileTime, set_file_mtime};
+
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let source_binary = tmp.path().join("source.exe");
         let hook_entry = tmp.path().join("pre-commit");
@@ -3085,12 +3210,156 @@ mod tests {
         assert!(first, "initial install should report change");
 
         fs::write(&source_binary, b"binary-v2").expect("failed to update source binary");
+        let hook_mtime = FileTime::from_unix_time(1_700_000_000, 0);
+        let source_mtime = FileTime::from_unix_time(1_700_000_010, 0);
+        set_file_mtime(&hook_entry, hook_mtime).expect("failed to set hook mtime");
+        set_file_mtime(&source_binary, source_mtime).expect("failed to set source mtime");
+
         let second = ensure_hook_entry_installed(&hook_entry, &source_binary, false)
             .expect("second install should succeed");
-        assert!(second, "updated source should trigger replacement");
+        assert!(second, "newer source should trigger replacement");
 
         let installed = fs::read(&hook_entry).expect("failed to read installed hook entry");
         assert_eq!(installed, b"binary-v2");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ensure_hook_entry_install_defers_when_hook_binary_is_locked() {
+        use filetime::{FileTime, set_file_mtime};
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let source_binary = tmp.path().join("source.exe");
+        let hook_entry = tmp.path().join("pre-commit");
+
+        fs::write(&source_binary, b"binary-v1").expect("failed to write source binary");
+        let first = ensure_hook_entry_installed(&hook_entry, &source_binary, false)
+            .expect("first install should succeed");
+        assert!(first, "initial install should report change");
+
+        fs::write(&source_binary, b"binary-v2").expect("failed to update source binary");
+        let hook_mtime = FileTime::from_unix_time(1_700_000_000, 0);
+        let source_mtime = FileTime::from_unix_time(1_700_000_000, 0);
+        set_file_mtime(&hook_entry, hook_mtime).expect("failed to set hook mtime");
+        set_file_mtime(&source_binary, source_mtime).expect("failed to set source mtime");
+
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&hook_entry)
+            .expect("failed to lock hook entry");
+
+        let deferred = ensure_hook_entry_installed(&hook_entry, &source_binary, false)
+            .expect("locked update should be deferred, not failed");
+        assert!(!deferred, "locked hook should be deferred");
+
+        drop(lock);
+
+        let installed_after_unlock =
+            fs::read(&hook_entry).expect("failed to read hook entry after lock release");
+        assert_eq!(
+            installed_after_unlock, b"binary-v1",
+            "locked hook should keep previous contents until lock is released"
+        );
+
+        let retried = ensure_hook_entry_installed(&hook_entry, &source_binary, false)
+            .expect("retry after lock release should succeed");
+        assert!(retried, "update should apply after lock release");
+
+        let installed_after_retry = fs::read(&hook_entry).expect("failed to read updated hook");
+        assert_eq!(installed_after_retry, b"binary-v2");
+    }
+
+    #[test]
+    fn resolve_repo_hook_binary_path_prefers_runtime_binary_over_saved_external_binary() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let managed_hooks_dir = tmp.path().join(".git").join("ai").join("hooks");
+        fs::create_dir_all(&managed_hooks_dir).expect("failed to create managed hooks dir");
+
+        let saved_binary = tmp.path().join("bin").join("saved-git-ai");
+        fs::create_dir_all(saved_binary.parent().expect("saved binary parent"))
+            .expect("failed to create saved binary parent");
+        fs::write(&saved_binary, b"saved-binary").expect("failed to write saved binary");
+
+        let runtime_binary = tmp.path().join("runtime").join("git-ai");
+        fs::create_dir_all(runtime_binary.parent().expect("runtime binary parent"))
+            .expect("failed to create runtime binary parent");
+        fs::write(&runtime_binary, b"runtime-binary").expect("failed to write runtime binary");
+
+        let state = RepoHookState {
+            binary_path: saved_binary.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let resolved = resolve_repo_hook_binary_path(
+            &managed_hooks_dir,
+            Some(&state),
+            Some(runtime_binary.clone()),
+        );
+        assert_eq!(
+            normalize_path(&resolved),
+            normalize_path(&runtime_binary),
+            "runtime binary should be preferred when it is an external, valid path"
+        );
+    }
+
+    #[test]
+    fn resolve_repo_hook_binary_path_accepts_prefixed_git_ai_runtime_binary() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let managed_hooks_dir = tmp.path().join(".git").join("ai").join("hooks");
+        fs::create_dir_all(&managed_hooks_dir).expect("failed to create managed hooks dir");
+
+        let runtime_binary = tmp
+            .path()
+            .join("target")
+            .join("debug")
+            .join("git_ai-abcdef");
+        fs::create_dir_all(runtime_binary.parent().expect("runtime binary parent"))
+            .expect("failed to create runtime binary parent");
+        fs::write(&runtime_binary, b"runtime-binary").expect("failed to write runtime binary");
+
+        let resolved =
+            resolve_repo_hook_binary_path(&managed_hooks_dir, None, Some(runtime_binary.clone()));
+        assert_eq!(
+            normalize_path(&resolved),
+            normalize_path(&runtime_binary),
+            "git_ai-* runtime binaries should be accepted as valid hook sources"
+        );
+    }
+
+    #[test]
+    fn resolve_repo_hook_binary_path_ignores_non_git_ai_runtime_binary() {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let managed_hooks_dir = tmp.path().join(".git").join("ai").join("hooks");
+        fs::create_dir_all(&managed_hooks_dir).expect("failed to create managed hooks dir");
+
+        let saved_binary = tmp.path().join("bin").join("git-ai");
+        fs::create_dir_all(saved_binary.parent().expect("saved binary parent"))
+            .expect("failed to create saved binary parent");
+        fs::write(&saved_binary, b"saved-binary").expect("failed to write saved binary");
+
+        let runtime_binary = tmp.path().join("runtime").join("test-runner-binary");
+        fs::create_dir_all(runtime_binary.parent().expect("runtime binary parent"))
+            .expect("failed to create runtime binary parent");
+        fs::write(&runtime_binary, b"runtime-binary").expect("failed to write runtime binary");
+
+        let state = RepoHookState {
+            binary_path: saved_binary.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let resolved = resolve_repo_hook_binary_path(
+            &managed_hooks_dir,
+            Some(&state),
+            Some(runtime_binary.clone()),
+        );
+        assert_eq!(
+            normalize_path(&resolved),
+            normalize_path(&saved_binary),
+            "non git-ai runtime binary should not override saved source binary"
+        );
     }
 
     #[test]
