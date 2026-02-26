@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // Create a guaranteed-unique temporary directory under the OS temp dir.
@@ -259,6 +260,30 @@ impl TmpFile {
     }
 }
 
+/// Initialise a shared test git configuration exactly once for the process.
+///
+/// Sets GIT_CONFIG_NOSYSTEM=1 and GIT_CONFIG_GLOBAL to a single empty file so
+/// that parallel tests never contend on the real system / global config files.
+/// On Windows CI this prevents "fatal: unknown error occurred while reading the
+/// configuration files" when many git subprocesses are spawned simultaneously.
+///
+/// Using OnceLock means the env vars are written exactly once; no concurrent
+/// writes can race, satisfying the safety requirement of set_var in tests.
+pub fn init_test_git_config() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let path = std::env::temp_dir().join("git-ai-test-global-gitconfig");
+        let _ = fs::write(&path, "");
+        // SAFETY: OnceLock guarantees this closure runs exactly once across all
+        // parallel test threads, so no concurrent mutations of the env vars are
+        // possible here.
+        unsafe {
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+            std::env::set_var("GIT_CONFIG_GLOBAL", &path);
+        }
+    });
+}
+
 #[allow(dead_code)]
 pub struct TmpRepo {
     path: PathBuf,
@@ -288,19 +313,7 @@ impl TmpRepo {
 
         println!("tmp_dir: {:?}", tmp_dir);
 
-        // Write a per-test empty global gitconfig and point git at it so that
-        // parallel tests do not contend on the real system/global config files.
-        // On Windows CI this prevents "unknown error occurred while reading the
-        // configuration files" when multiple tests run git commands simultaneously.
-        // This mirrors the GIT_AI_TEST_DB_PATH pattern above: the last writer
-        // wins but every value is a valid, readable, unlocked file.
-        let isolated_global_config = tmp_dir.join(".gitconfig");
-        fs::write(&isolated_global_config, "").map_err(GitAiError::IoError)?;
-        // SAFETY: test-only code; same pattern as GIT_AI_TEST_DB_PATH above.
-        unsafe {
-            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-            std::env::set_var("GIT_CONFIG_GLOBAL", &isolated_global_config);
-        }
+        init_test_git_config();
 
         // Initialize git repository
         let repo_git2 = Repository::init(&tmp_dir)?;
