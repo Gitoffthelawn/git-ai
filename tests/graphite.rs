@@ -144,7 +144,8 @@ fn get_wrapper_dir() -> &'static PathBuf {
 fn wrapper_path() -> String {
     let wrapper_dir = get_wrapper_dir();
     let original_path = std::env::var("PATH").unwrap_or_default();
-    format!("{}:{}", wrapper_dir.display(), original_path)
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    format!("{}{}{}", wrapper_dir.display(), sep, original_path)
 }
 
 /// Find the absolute path of the real `git` binary (before our wrapper).
