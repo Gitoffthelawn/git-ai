@@ -11,7 +11,7 @@ use crate::git::repository::{exec_git, exec_git_stdin};
 use crate::utils::normalize_to_posix;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::sync::LazyLock;
@@ -196,49 +196,109 @@ impl Default for GitAiBlameOptions {
 }
 
 impl Repository {
-    fn resolve_blame_abbrev_sha(
-        &self,
-        commit_sha: &str,
-        is_boundary: bool,
-        options: &GitAiBlameOptions,
-        cache: &mut HashMap<(String, usize), String>,
-    ) -> String {
-        if options.long_rev {
-            return commit_sha.to_string();
-        }
+    const BLAME_ABBREV_BATCH_SIZE: usize = 256;
 
+    fn blame_requested_abbrev_len(options: &GitAiBlameOptions, is_boundary: bool) -> usize {
         let base_len = options.abbrev.unwrap_or(7).max(1) as usize;
-        let requested_len = if is_boundary && !options.show_root {
+        if is_boundary && !options.show_root {
             base_len
         } else {
             (base_len + 1).min(40)
-        };
-        let cache_key = (commit_sha.to_string(), requested_len);
+        }
+    }
 
-        if let Some(cached) = cache.get(&cache_key) {
-            return cached.clone();
+    fn fallback_blame_abbrev_sha(commit_sha: &str, requested_len: usize) -> String {
+        if requested_len < commit_sha.len() {
+            commit_sha[..requested_len].to_string()
+        } else {
+            commit_sha.to_string()
+        }
+    }
+
+    fn resolve_blame_abbrev_shas_batched(
+        &self,
+        requests_by_len: &HashMap<usize, Vec<String>>,
+    ) -> HashMap<(String, usize), String> {
+        let mut resolved: HashMap<(String, usize), String> = HashMap::new();
+
+        for (&requested_len, commit_shas) in requests_by_len {
+            if commit_shas.is_empty() {
+                continue;
+            }
+
+            for commit_sha_batch in commit_shas.chunks(Self::BLAME_ABBREV_BATCH_SIZE) {
+                let mut args = self.global_args_for_exec();
+                args.push("rev-parse".to_string());
+                args.push(format!("--short={requested_len}"));
+                args.extend(commit_sha_batch.iter().cloned());
+
+                let batched_result = exec_git(&args)
+                    .ok()
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+                    .map(|stdout| {
+                        stdout
+                            .lines()
+                            .map(str::trim)
+                            .filter(|line| !line.is_empty())
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    });
+
+                if let Some(short_shas) = batched_result
+                    && short_shas.len() == commit_sha_batch.len()
+                {
+                    for (commit_sha, short_sha) in commit_sha_batch.iter().zip(short_shas) {
+                        resolved.insert((commit_sha.clone(), requested_len), short_sha);
+                    }
+                    continue;
+                }
+
+                for commit_sha in commit_sha_batch {
+                    resolved
+                        .entry((commit_sha.clone(), requested_len))
+                        .or_insert_with(|| {
+                            Self::fallback_blame_abbrev_sha(commit_sha, requested_len)
+                        });
+                }
+            }
         }
 
-        let mut args = self.global_args_for_exec();
-        args.push("rev-parse".to_string());
-        args.push(format!("--short={requested_len}"));
-        args.push(commit_sha.to_string());
-
-        let resolved = exec_git(&args)
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|short| short.trim().to_string())
-            .filter(|short| !short.is_empty())
-            .unwrap_or_else(|| {
-                if requested_len < commit_sha.len() {
-                    commit_sha[..requested_len].to_string()
-                } else {
-                    commit_sha.to_string()
-                }
-            });
-
-        cache.insert(cache_key, resolved.clone());
         resolved
+    }
+
+    fn populate_hunk_abbrev_shas(&self, hunks: &mut [BlameHunk], options: &GitAiBlameOptions) {
+        if options.long_rev {
+            for hunk in hunks {
+                hunk.abbrev_sha = hunk.commit_sha.clone();
+            }
+            return;
+        }
+
+        let mut requests_by_len: HashMap<usize, Vec<String>> = HashMap::new();
+        let mut seen_by_len: HashMap<usize, HashSet<String>> = HashMap::new();
+
+        for hunk in hunks.iter() {
+            let requested_len = Self::blame_requested_abbrev_len(options, hunk.is_boundary);
+            let seen = seen_by_len.entry(requested_len).or_default();
+            if seen.insert(hunk.commit_sha.clone()) {
+                requests_by_len
+                    .entry(requested_len)
+                    .or_default()
+                    .push(hunk.commit_sha.clone());
+            }
+        }
+
+        let resolved = self.resolve_blame_abbrev_shas_batched(&requests_by_len);
+
+        for hunk in hunks.iter_mut() {
+            let requested_len = Self::blame_requested_abbrev_len(options, hunk.is_boundary);
+            hunk.abbrev_sha = resolved
+                .get(&(hunk.commit_sha.clone(), requested_len))
+                .cloned()
+                .unwrap_or_else(|| {
+                    Self::fallback_blame_abbrev_sha(&hunk.commit_sha, requested_len)
+                });
+        }
     }
 
     #[allow(clippy::type_complexity)]
@@ -550,7 +610,6 @@ impl Repository {
         let mut cur_orig_start: u32 = 0;
         let mut cur_group_size: u32 = 0;
         let mut cur_meta = CurMeta::default();
-        let mut abbrev_cache: HashMap<(String, usize), String> = HashMap::new();
 
         for line in stdout.lines() {
             if line.is_empty() {
@@ -645,18 +704,11 @@ impl Repository {
                         orig_start
                     };
 
-                    let abbrev = self.resolve_blame_abbrev_sha(
-                        &prev_sha,
-                        cur_meta.boundary,
-                        options,
-                        &mut abbrev_cache,
-                    );
-
                     hunks.push(BlameHunk {
                         range: (start, end),
                         orig_range: (orig_start, orig_end),
                         commit_sha: prev_sha,
-                        abbrev_sha: abbrev,
+                        abbrev_sha: String::new(),
                         original_author: cur_meta.author.clone(),
                         author_email: cur_meta.author_mail.clone(),
                         author_time: cur_meta.author_time,
@@ -710,18 +762,11 @@ impl Repository {
                 orig_start
             };
 
-            let abbrev = self.resolve_blame_abbrev_sha(
-                &prev_sha,
-                cur_meta.boundary,
-                options,
-                &mut abbrev_cache,
-            );
-
             hunks.push(BlameHunk {
                 range: (start, end),
                 orig_range: (orig_start, orig_end),
                 commit_sha: prev_sha,
-                abbrev_sha: abbrev,
+                abbrev_sha: String::new(),
                 original_author: cur_meta.author.clone(),
                 author_email: cur_meta.author_mail.clone(),
                 author_time: cur_meta.author_time,
@@ -734,6 +779,8 @@ impl Repository {
                 is_boundary: cur_meta.boundary,
             });
         }
+
+        self.populate_hunk_abbrev_shas(&mut hunks, options);
 
         // Post-process hunks to populate ai_human_author from authorship logs
         let hunks = self.populate_ai_human_authors(hunks, file_path, options)?;
