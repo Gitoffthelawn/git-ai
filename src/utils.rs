@@ -202,7 +202,7 @@ pub fn is_interactive_terminal() -> bool {
 /// for the lifetime of the struct. The lock is automatically released when dropped
 /// or when the process exits.
 pub struct LockFile {
-    _file: std::fs::File,
+    file: std::fs::File,
 }
 
 impl LockFile {
@@ -210,7 +210,15 @@ impl LockFile {
     /// Returns `Some(LockFile)` if successful, `None` if another process holds the lock.
     pub fn try_acquire(path: &std::path::Path) -> Option<Self> {
         let file = try_lock_exclusive(path)?;
-        Some(Self { _file: file })
+        Some(Self { file })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 
