@@ -180,9 +180,12 @@ impl GitClientInstaller for ForkAppInstaller {
         let custom_path = Self::read_custom_git_path();
 
         let is_custom = git_type == Some(git_instance_type::CUSTOM);
+        // Use forward slashes for JSON compatibility on Windows (consistent with
+        // Sublime Merge and the to_git_bash_path() helper from PR #603)
+        let desired_path = params.git_shim_path.to_string_lossy().replace('\\', "/");
         let path_matches = custom_path
             .as_ref()
-            .map(|p| p == params.git_shim_path.to_string_lossy().as_ref())
+            .map(|p| p == &desired_path)
             .unwrap_or(false);
 
         let prefs_configured = is_custom && custom_path.is_some();
@@ -212,7 +215,9 @@ impl GitClientInstaller for ForkAppInstaller {
         }
 
         let settings_path = Self::settings_path();
-        let git_wrapper_path = params.git_shim_path.to_string_lossy().into_owned();
+        // Use forward slashes for JSON compatibility on Windows (consistent with
+        // Sublime Merge and the to_git_bash_path() helper from PR #603)
+        let git_wrapper_path = params.git_shim_path.to_string_lossy().replace('\\', "/");
 
         // Read existing settings
         let original = if settings_path.exists() {
@@ -410,5 +415,125 @@ impl ForkAppInstaller {
             .get("CustomGitInstancePath")?
             .as_str()
             .map(|s| s.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mdm::git_client_installer::GitClientInstallerParams;
+    use std::path::PathBuf;
+
+    /// Regression test for issue #606: Fork on Windows should use forward slashes
+    /// in the CustomGitInstancePath setting, consistent with Sublime Merge and
+    /// the to_git_bash_path() helper added in PR #603.
+    #[test]
+    fn test_fork_windows_path_uses_forward_slashes() {
+        // Simulate a Windows-style path with backslashes
+        let shim_path = PathBuf::from(r"C:\Users\marti\.git-ai\bin\git.exe");
+        let params = GitClientInstallerParams {
+            git_shim_path: shim_path,
+        };
+
+        // The normalized path used in settings should use forward slashes
+        let normalized = params.git_shim_path.to_string_lossy().replace('\\', "/");
+        assert_eq!(
+            normalized, "C:/Users/marti/.git-ai/bin/git.exe",
+            "Fork should store paths with forward slashes in settings JSON"
+        );
+    }
+
+    /// Regression test: Unix paths should pass through unchanged
+    #[test]
+    fn test_fork_unix_path_preserved() {
+        let shim_path = PathBuf::from("/home/user/.local/bin/git");
+        let params = GitClientInstallerParams {
+            git_shim_path: shim_path,
+        };
+
+        let normalized = params.git_shim_path.to_string_lossy().replace('\\', "/");
+        assert_eq!(
+            normalized, "/home/user/.local/bin/git",
+            "Unix paths should be unchanged"
+        );
+    }
+
+    /// Regression test: Windows extended-length prefix should be handled
+    #[test]
+    fn test_fork_windows_extended_path_prefix_cleaned() {
+        use crate::mdm::utils::clean_path;
+
+        let raw_path = PathBuf::from(r"\\?\C:\Users\marti\.git-ai\bin\git.exe");
+        let cleaned = clean_path(raw_path);
+        let normalized = cleaned.to_string_lossy().replace('\\', "/");
+
+        assert!(
+            !normalized.contains(r"\\?\"),
+            "Extended path prefix should be stripped"
+        );
+        assert_eq!(
+            normalized, "C:/Users/marti/.git-ai/bin/git.exe",
+            "Path should use forward slashes after cleaning"
+        );
+    }
+
+    /// Regression test: Fork install_prefs on Windows should write settings
+    /// with forward-slash paths to settings.json
+    #[test]
+    fn test_fork_install_prefs_writes_forward_slash_path() {
+        use serde_json::json;
+        use std::fs;
+        use tempfile::TempDir;
+
+        // Create a temporary Fork settings directory
+        let tmp_dir = TempDir::new().unwrap();
+        let settings_dir = tmp_dir.path().join("Fork");
+        fs::create_dir_all(&settings_dir).unwrap();
+        let settings_path = settings_dir.join("settings.json");
+
+        // Write initial settings with a Windows-backslash path (simulating old behavior)
+        let initial_settings = json!({
+            "GitInstanceType": git_instance_type::CUSTOM,
+            "CustomGitInstancePath": r"C:\Users\marti\.git-ai\bin\git.exe"
+        });
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&initial_settings).unwrap(),
+        )
+        .unwrap();
+
+        // Read it back and verify the path has backslashes
+        let content = fs::read_to_string(&settings_path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let stored_path = settings["CustomGitInstancePath"].as_str().unwrap();
+        assert!(
+            stored_path.contains('\\'),
+            "Initial settings should have backslash path"
+        );
+
+        // Now simulate what the fixed installer would write
+        let shim_path = PathBuf::from(r"C:\Users\marti\.git-ai\bin\git.exe");
+        let git_wrapper_path = shim_path.to_string_lossy().replace('\\', "/");
+
+        let mut new_settings = settings.clone();
+        new_settings["CustomGitInstancePath"] = json!(git_wrapper_path);
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&new_settings).unwrap(),
+        )
+        .unwrap();
+
+        // Verify the written path uses forward slashes
+        let content = fs::read_to_string(&settings_path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let stored_path = settings["CustomGitInstancePath"].as_str().unwrap();
+        assert_eq!(
+            stored_path, "C:/Users/marti/.git-ai/bin/git.exe",
+            "Fork settings should store paths with forward slashes"
+        );
+        assert!(
+            !stored_path.contains('\\'),
+            "Path should not contain backslashes"
+        );
     }
 }
