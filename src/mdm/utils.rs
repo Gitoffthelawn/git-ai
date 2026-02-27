@@ -569,6 +569,18 @@ pub fn clean_path(path: PathBuf) -> PathBuf {
     path
 }
 
+/// Convert a Windows path to a forward-slash path suitable for native Windows apps.
+/// e.g. `C:\Users\Administrator\.git-ai\bin\git.exe` → `C:/Users/Administrator/.git-ai/bin/git.exe`
+/// Also strips the `\\?\` extended-length prefix if present (via `clean_path`).
+/// This is needed because native GUI apps like Fork and Sublime Merge store paths
+/// with forward slashes in their JSON settings files.
+/// Non-Windows paths are returned unchanged.
+pub fn to_forward_slash_path(path: &Path) -> String {
+    clean_path(path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 /// Convert a Windows path to git bash (MSYS/MinGW) style path.
 /// e.g. `C:\Users\Administrator\.git-ai\bin\git-ai.exe` → `/c/Users/Administrator/.git-ai/bin/git-ai.exe`
 /// This is needed because Claude Code runs hooks in git bash shell on Windows.
@@ -1427,5 +1439,19 @@ mod tests {
         let path = PathBuf::from("/usr/local/bin/git-ai");
         let cleaned = clean_path(path.clone());
         assert_eq!(cleaned, path);
+    }
+
+    #[test]
+    fn test_to_forward_slash_path_converts_backslashes() {
+        let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git.exe");
+        let result = to_forward_slash_path(&path);
+        assert_eq!(result, "C:/Users/Administrator/.git-ai/bin/git.exe");
+    }
+
+    #[test]
+    fn test_to_forward_slash_path_preserves_unix_path() {
+        let path = PathBuf::from("/usr/local/bin/git");
+        let result = to_forward_slash_path(&path);
+        assert_eq!(result, "/usr/local/bin/git");
     }
 }

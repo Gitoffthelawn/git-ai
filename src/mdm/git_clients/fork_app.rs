@@ -7,15 +7,13 @@ use crate::mdm::git_client_installer::{
 use super::mac_prefs::{Preferences, find_app_by_bundle_id};
 
 #[cfg(windows)]
-use crate::mdm::utils::{clean_path, home_dir, write_atomic};
+use crate::mdm::utils::{home_dir, to_forward_slash_path, write_atomic};
 #[cfg(windows)]
 use serde_json::{Value, json};
 
 #[cfg(windows)]
 fn fork_custom_git_instance_path(git_shim_path: &std::path::Path) -> String {
-    clean_path(git_shim_path.to_path_buf())
-        .to_string_lossy()
-        .replace('\\', "/")
+    to_forward_slash_path(git_shim_path)
 }
 #[cfg(windows)]
 use std::fs;
@@ -427,11 +425,13 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn test_fork_custom_git_instance_path_uses_forward_slash_windows_path() {
+    fn test_fork_custom_git_instance_path_uses_forward_slashes() {
         let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git.exe");
-        assert_eq!(
-            fork_custom_git_instance_path(&path),
-            "C:/Users/Administrator/.git-ai/bin/git.exe"
+        let result = fork_custom_git_instance_path(&path);
+        assert_eq!(result, "C:/Users/Administrator/.git-ai/bin/git.exe");
+        assert!(
+            !result.starts_with('/'),
+            "should be a Windows path, not MSYS"
         );
     }
 }
