@@ -454,18 +454,11 @@ fn unset_hooks_path_in_local_config(repo: &Repository, dry_run: bool) -> Result<
     }
 
     if !dry_run {
-        let mut args = repo.global_args_for_exec();
-        args.extend(
-            [
-                "config",
-                "--local",
-                "--unset-all",
-                CONFIG_KEY_CORE_HOOKS_PATH,
-            ]
-            .iter()
-            .map(|value| value.to_string()),
-        );
-        crate::git::repository::exec_git(&args)?;
+        let mut cfg = load_config(&local_config_path, gix_config::Source::Local)?;
+        if let Ok(mut hooks_path_values) = cfg.raw_values_mut_by("core", None, "hooksPath") {
+            hooks_path_values.delete_all();
+        }
+        write_config(&local_config_path, &cfg)?;
     }
 
     Ok(true)

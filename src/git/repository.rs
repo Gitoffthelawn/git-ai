@@ -10,6 +10,7 @@ use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes}
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 
+use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1303,29 +1304,82 @@ impl Repository {
         Ok(remotes)
     }
 
-    /// Get config value for a given key as a String.
-    ///
-    /// Uses `git config --get` so linked worktrees resolve against the same
-    /// config sources Git itself uses (worktree config + common config + global).
-    pub fn config_get_str(&self, key: &str) -> Result<Option<String>, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("config".to_string());
-        args.push("--get".to_string());
-        args.push(key.to_string());
-
-        match exec_git(&args) {
-            Ok(output) => {
-                let value = String::from_utf8(output.stdout)?;
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(trimmed.to_string()))
-                }
-            }
-            Err(GitAiError::GitCliError { code: Some(1), .. }) => Ok(None),
-            Err(err) => Err(err),
+    fn load_optional_config_file(
+        path: &Path,
+        source: gix_config::Source,
+    ) -> Result<Option<gix_config::File<'static>>, GitAiError> {
+        if !path.exists() {
+            return Ok(None);
         }
+        gix_config::File::from_path_no_includes(path.to_path_buf(), source)
+            .map(Some)
+            .map_err(|e| GitAiError::GixError(e.to_string()))
+    }
+
+    fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
+        let mut config =
+            gix_config::File::from_globals().map_err(|e| GitAiError::GixError(e.to_string()))?;
+
+        let home = dirs::home_dir();
+        let options = gix_config::file::init::Options {
+            includes: gix_config::file::includes::Options::follow(
+                gix_config::path::interpolate::Context {
+                    home_dir: home.as_deref(),
+                    ..Default::default()
+                },
+                gix_config::file::includes::conditional::Context {
+                    git_dir: Some(self.path()),
+                    branch_name: None,
+                },
+            ),
+            ..Default::default()
+        };
+
+        config
+            .resolve_includes(options)
+            .map_err(|e| GitAiError::GixError(e.to_string()))?;
+
+        let local_config_path = self.common_dir().join("config");
+        let local_config =
+            Self::load_optional_config_file(&local_config_path, gix_config::Source::Local)?;
+        let worktree_config_enabled = local_config
+            .as_ref()
+            .and_then(|cfg| cfg.boolean("extensions.worktreeConfig"))
+            .and_then(Result::ok)
+            .unwrap_or(false);
+
+        if let Some(mut local_config) = local_config {
+            local_config
+                .resolve_includes(options)
+                .map_err(|e| GitAiError::GixError(e.to_string()))?;
+            config.append(local_config);
+        }
+
+        if worktree_config_enabled {
+            let worktree_config_path = self.path().join("config.worktree");
+            if let Some(mut worktree_config) = Self::load_optional_config_file(
+                &worktree_config_path,
+                gix_config::Source::Worktree,
+            )? {
+                worktree_config
+                    .resolve_includes(options)
+                    .map_err(|e| GitAiError::GixError(e.to_string()))?;
+                config.append(worktree_config);
+            }
+        }
+
+        config.append(
+            gix_config::File::from_environment_overrides()
+                .map_err(|e| GitAiError::GixError(e.to_string()))?,
+        );
+
+        Ok(config)
+    }
+
+    /// Get config value for a given key as a String.
+    pub fn config_get_str(&self, key: &str) -> Result<Option<String>, GitAiError> {
+        self.get_git_config_file()
+            .map(|cfg| cfg.string(key).map(|cow| cow.to_string()))
     }
 
     /// Get all config values matching a regex pattern.
@@ -1339,27 +1393,33 @@ impl Repository {
         &self,
         pattern: &str,
     ) -> Result<std::collections::HashMap<String, String>, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("config".to_string());
-        args.push("--get-regexp".to_string());
-        args.push(pattern.to_string());
+        let re = Regex::new(pattern)
+            .map_err(|e| GitAiError::Generic(format!("Invalid regex pattern: {}", e)))?;
 
-        match exec_git(&args) {
-            Ok(output) => {
-                let stdout = String::from_utf8(output.stdout)?;
-                let mut matches: HashMap<String, String> = HashMap::new();
-                for line in stdout.lines() {
-                    if let Some((key, value)) = line.split_once(' ') {
-                        matches.insert(key.to_string(), value.to_string());
-                    } else if !line.trim().is_empty() {
-                        matches.insert(line.trim().to_string(), String::new());
-                    }
+        let config = self.get_git_config_file()?;
+        let mut matches: HashMap<String, String> = HashMap::new();
+
+        for section in config.sections() {
+            let section_name = section.header().name().to_string().to_lowercase();
+            let subsection = section.header().subsection_name();
+
+            for value_name in section.body().value_names() {
+                let value_name_str = value_name.to_string().to_lowercase();
+                let full_key = if let Some(sub) = subsection {
+                    format!("{}.{}.{}", section_name, sub, value_name_str)
+                } else {
+                    format!("{}.{}", section_name, value_name_str)
+                };
+
+                if re.is_match(&full_key)
+                    && let Some(value) = section.body().value(value_name).map(|c| c.to_string())
+                {
+                    matches.insert(full_key, value);
                 }
-                Ok(matches)
             }
-            Err(GitAiError::GitCliError { code: Some(1), .. }) => Ok(HashMap::new()),
-            Err(err) => Err(err),
         }
+
+        Ok(matches)
     }
 
     /// Get the git version as a tuple (major, minor, patch).
