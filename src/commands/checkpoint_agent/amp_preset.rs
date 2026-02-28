@@ -190,7 +190,7 @@ impl AgentCheckpointPreset for AmpPreset {
 
 impl AmpPreset {
     /// Get the default Amp threads directory based on platform.
-    /// Expected layout: {threads_dir}/T-<thread-id>.json
+    /// Expected layout: `{threads_dir}/T-THREAD_ID.json`
     pub fn amp_threads_path() -> Result<PathBuf, GitAiError> {
         if let Ok(test_path) = std::env::var("GIT_AI_AMP_THREADS_PATH") {
             return Ok(PathBuf::from(test_path));
