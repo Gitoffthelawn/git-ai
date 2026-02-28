@@ -1145,6 +1145,7 @@ fn output_porcelain_format(
     requested_lines.sort_unstable();
 
     let mut last_hunk_id = None;
+    let mut commit_summaries: HashMap<String, String> = HashMap::new();
     let mut seen_commits: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line_num in requested_lines {
         let line_index = (line_num - 1) as usize;
@@ -1167,12 +1168,16 @@ fn output_porcelain_format(
             let boundary = hunk.is_boundary;
             let filename = file_path;
 
-            // Retrieve the commit summary directly from the commit object
-            let commit = repo.find_commit(commit_sha.clone())?;
-            let summary = commit.summary()?;
-
             let hunk_id = (commit_sha.clone(), hunk.range.0);
             if options.line_porcelain {
+                let summary = if let Some(summary) = commit_summaries.get(commit_sha) {
+                    summary.clone()
+                } else {
+                    let commit = repo.find_commit(commit_sha.clone())?;
+                    let summary = commit.summary()?;
+                    commit_summaries.insert(commit_sha.clone(), summary.clone());
+                    summary
+                };
                 if last_hunk_id.as_ref() != Some(&hunk_id) {
                     // First line of hunk: 4-field header
                     println!(
@@ -1212,6 +1217,14 @@ fn output_porcelain_format(
                         hunk.range.1 - hunk.range.0 + 1
                     );
                     if !seen_commits.contains(commit_sha) {
+                        let summary = if let Some(summary) = commit_summaries.get(commit_sha) {
+                            summary.clone()
+                        } else {
+                            let commit = repo.find_commit(commit_sha.clone())?;
+                            let summary = commit.summary()?;
+                            commit_summaries.insert(commit_sha.clone(), summary.clone());
+                            summary
+                        };
                         println!("author {}", author_name);
                         println!("author-mail <{}>", author_email);
                         println!("author-time {}", author_time);
@@ -1264,6 +1277,7 @@ fn output_incremental_format(
     requested_lines.sort_unstable();
 
     let mut last_hunk_id = None;
+    let mut commit_summaries: HashMap<String, String> = HashMap::new();
     let mut seen_commits: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line_num in requested_lines {
         if let Some(hunk) = line_to_hunk.get(&line_num) {
@@ -1290,6 +1304,14 @@ fn output_incremental_format(
                     hunk.range.1 - hunk.range.0 + 1
                 );
                 if !seen_commits.contains(commit_sha) {
+                    let summary = if let Some(summary) = commit_summaries.get(commit_sha) {
+                        summary.clone()
+                    } else {
+                        let commit = repo.find_commit(commit_sha.clone())?;
+                        let summary = commit.summary()?;
+                        commit_summaries.insert(commit_sha.clone(), summary.clone());
+                        summary
+                    };
                     println!("author {}", author_name);
                     println!("author-mail <{}>", author_email);
                     println!("author-time {}", author_time);
@@ -1298,7 +1320,7 @@ fn output_incremental_format(
                     println!("committer-mail <{}>", committer_email);
                     println!("committer-time {}", committer_time);
                     println!("committer-tz {}", committer_tz);
-                    println!("summary Initial commit");
+                    println!("summary {}", summary);
                     if hunk.is_boundary {
                         println!("boundary");
                     }
