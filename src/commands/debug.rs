@@ -571,29 +571,43 @@ fn redact_git_config_line(line: &str) -> String {
     }
 
     let mut parts = line.splitn(3, '\t');
-    let scope = match parts.next() {
+    let first = match parts.next() {
         Some(v) => v,
         None => return line.to_string(),
     };
-    let origin = match parts.next() {
-        Some(v) => v,
-        None => return line.to_string(),
-    };
-    let key_value = match parts.next() {
+    let second = match parts.next() {
         Some(v) => v,
         None => return line.to_string(),
     };
 
-    let (key, value) = match key_value.split_once('=') {
-        Some((key, value)) => (key, value),
-        None => return line.to_string(),
-    };
-
-    if should_redact_key_value(key, value) {
-        return format!("{}\t{}\t{}=[REDACTED]", scope, origin, key);
+    match parts.next() {
+        // 3-field format: scope \t origin \t key=value
+        // (from `git config --list --show-origin --show-scope`)
+        Some(key_value) => {
+            let (key, value) = match key_value.split_once('=') {
+                Some((key, value)) => (key, value),
+                None => return line.to_string(),
+            };
+            if should_redact_key_value(key, value) {
+                format!("{}\t{}\t{}=[REDACTED]", first, second, key)
+            } else {
+                line.to_string()
+            }
+        }
+        // 2-field format: origin \t key=value
+        // (from `git config --list --show-origin` without --show-scope)
+        None => {
+            let (key, value) = match second.split_once('=') {
+                Some((key, value)) => (key, value),
+                None => return line.to_string(),
+            };
+            if should_redact_key_value(key, value) {
+                format!("{}\t{}=[REDACTED]", first, key)
+            } else {
+                line.to_string()
+            }
+        }
     }
-
-    line.to_string()
 }
 
 fn should_redact_key_value(key: &str, value: &str) -> bool {
@@ -699,6 +713,24 @@ mod tests {
     #[test]
     fn test_redact_git_config_line_keeps_non_sensitive_key() {
         let line = "global\tfile:/Users/me/.gitconfig\tcore.editor=vim";
+        let redacted = redact_git_config_line(line);
+        assert_eq!(redacted, line);
+    }
+
+    #[test]
+    fn test_redact_git_config_line_two_field_format_redacts_sensitive() {
+        // `git config --list --show-origin` (without --show-scope) produces 2-tab fields
+        let line = "file:/Users/me/.gitconfig\thttp.https://example.com/.extraheader=BEARER secret123";
+        let redacted = redact_git_config_line(line);
+        assert_eq!(
+            redacted,
+            "file:/Users/me/.gitconfig\thttp.https://example.com/.extraheader=[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn test_redact_git_config_line_two_field_format_keeps_non_sensitive() {
+        let line = "file:/Users/me/.gitconfig\tcore.editor=vim";
         let redacted = redact_git_config_line(line);
         assert_eq!(redacted, line);
     }
