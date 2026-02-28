@@ -674,7 +674,8 @@ fn redact_env_value(key: &str, value: &str) -> String {
     }
 
     if trimmed.len() > 200 {
-        return format!("{}...[truncated]", &trimmed[..200]);
+        let truncated: String = trimmed.chars().take(200).collect();
+        return format!("{}...[truncated]", truncated);
     }
 
     trimmed.to_string()
