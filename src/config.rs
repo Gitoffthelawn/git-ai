@@ -459,7 +459,6 @@ where
             "****".to_string()
         }
     });
-    });
     masked.serialize(serializer)
 }
 

@@ -720,7 +720,8 @@ mod tests {
     #[test]
     fn test_redact_git_config_line_two_field_format_redacts_sensitive() {
         // `git config --list --show-origin` (without --show-scope) produces 2-tab fields
-        let line = "file:/Users/me/.gitconfig\thttp.https://example.com/.extraheader=BEARER secret123";
+        let line =
+            "file:/Users/me/.gitconfig\thttp.https://example.com/.extraheader=BEARER secret123";
         let redacted = redact_git_config_line(line);
         assert_eq!(
             redacted,
