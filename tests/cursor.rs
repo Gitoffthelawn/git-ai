@@ -325,6 +325,32 @@ fn test_cursor_preset_human_checkpoint_no_filepath() {
 }
 
 #[test]
+fn test_cursor_checkpoint_stdin_with_utf8_bom() {
+    let repo = TestRepo::new();
+    let hook_input = format!(
+        "\u{feff}{}",
+        serde_json::json!({
+            "conversation_id": "test-conversation-id",
+            "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
+            "hook_event_name": "beforeSubmitPrompt",
+            "model": "model-name-from-hook-test"
+        })
+    );
+
+    let output = repo
+        .git_ai_with_stdin(
+            &["checkpoint", "cursor", "--hook-input", "stdin"],
+            hook_input.as_bytes(),
+        )
+        .expect("checkpoint should parse stdin payload with UTF-8 BOM");
+
+    assert!(
+        !output.contains("Invalid JSON in hook_input"),
+        "Should not fail JSON parsing when stdin has UTF-8 BOM. Output: {output}"
+    );
+}
+
+#[test]
 fn test_cursor_e2e_with_attribution() {
     use std::fs;
 

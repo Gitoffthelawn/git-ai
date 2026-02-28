@@ -294,7 +294,7 @@ fn handle_checkpoint(args: &[String]) {
             }
             "--hook-input" => {
                 if i + 1 < args.len() {
-                    hook_input = Some(args[i + 1].clone());
+                    hook_input = Some(strip_utf8_bom(args[i + 1].clone()));
                     if hook_input.as_ref().unwrap() == "stdin" {
                         let mut stdin = std::io::stdin();
                         let mut buffer = String::new();
@@ -303,7 +303,7 @@ fn handle_checkpoint(args: &[String]) {
                             std::process::exit(0);
                         }
                         if !buffer.trim().is_empty() {
-                            hook_input = Some(buffer);
+                            hook_input = Some(strip_utf8_bom(buffer));
                         } else {
                             eprintln!("No hook input provided (via --hook-input or stdin).");
                             std::process::exit(0);
@@ -931,6 +931,14 @@ fn handle_checkpoint(args: &[String]) {
 
     if local_checkpoint_failed {
         std::process::exit(0);
+    }
+}
+
+fn strip_utf8_bom(input: String) -> String {
+    if let Some(stripped) = input.strip_prefix('\u{feff}') {
+        stripped.to_string()
+    } else {
+        input
     }
 }
 
