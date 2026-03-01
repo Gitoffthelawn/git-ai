@@ -57,6 +57,9 @@ pub fn handle_git_ai(args: &[String]) {
                 log_message("config", "info", None)
             }
         }
+        "debug" => {
+            commands::debug::handle_debug(&args[1..]);
+        }
         "stats" => {
             if is_interactive_terminal() {
                 log_message("stats", "info", None)
@@ -138,6 +141,9 @@ pub fn handle_git_ai(args: &[String]) {
         "logout" => {
             commands::logout::handle_logout(&args[1..]);
         }
+        "whoami" => {
+            commands::whoami::handle_whoami(&args[1..]);
+        }
         "exchange-nonce" => {
             commands::exchange_nonce::handle_exchange_nonce(&args[1..]);
         }
@@ -217,6 +223,7 @@ fn print_help() {
     eprintln!("    set <key> <value>     Set a config value (arrays: single value = [value])");
     eprintln!("    --add <key> <value>   Add to array or upsert into object");
     eprintln!("    unset <key>           Remove config value (reverts to default)");
+    eprintln!("  debug              Print support/debug diagnostics");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
     eprintln!("  git-hooks ensure   Ensure repo-local git-ai hooks are installed/healed");
@@ -265,6 +272,7 @@ fn print_help() {
     eprintln!("    --json                Output context as structured JSON");
     eprintln!("  login              Authenticate with Git AI");
     eprintln!("  logout             Clear stored credentials");
+    eprintln!("  whoami             Show auth state and login identity");
     eprintln!("  version, -v, --version     Print the git-ai version");
     eprintln!("  help, -h, --help           Show this help message");
     eprintln!();
