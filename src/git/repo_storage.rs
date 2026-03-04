@@ -352,11 +352,15 @@ impl PersistedWorkingLog {
             // For other tools, check if they have the necessary metadata for refetching
             // cursor can always refetch from its database
             "cursor" => false,
-            // claude, codex, gemini, continue-cli, amp need transcript_path
-            "claude" | "codex" | "gemini" | "continue-cli" | "amp" => metadata
-                .as_ref()
-                .and_then(|m| m.get("transcript_path"))
-                .is_none(),
+            // claude, codex, gemini, continue-cli, amp, windsurf, droid need transcript_path
+            "claude" | "codex" | "gemini" | "continue-cli" | "amp" | "windsurf" | "droid" => {
+                metadata
+                    .as_ref()
+                    .and_then(|m| m.get("transcript_path"))
+                    .is_none()
+            }
+            // opencode can always refetch from its session storage
+            "opencode" => false,
             // github-copilot needs chat_session_path
             "github-copilot" => metadata
                 .as_ref()
