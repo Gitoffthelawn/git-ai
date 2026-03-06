@@ -664,9 +664,31 @@ fn build_config() -> Config {
     }
 }
 
-/// Load custom attributes on demand from file config + env var.
-/// Called at post-commit time (not at config init) so the env var is read
-/// in the correct process context.
+/// Load custom attributes on demand from `~/.git-ai/config.json` and/or
+/// the `GIT_AI_CUSTOM_ATTRIBUTES` environment variable.
+///
+/// These key-value pairs are attached to every `PromptRecord` in git notes
+/// and included in metric events (position 30, JSON-encoded). Enterprise
+/// users can use them to tag AI authorship data with organizational metadata
+/// such as employee IDs, device IDs, team names, etc.
+///
+/// # Resolution order
+/// 1. Read `custom_attributes` from `~/.git-ai/config.json` (if present).
+/// 2. Parse `GIT_AI_CUSTOM_ATTRIBUTES` env var as a JSON object. Env var
+///    keys **override** file config keys on conflict.
+/// 3. Drop any key whose value is not a string, number, or boolean
+///    (arrays, objects, and null are silently ignored via `debug_log`).
+///
+/// # Why this is not part of `Config`
+/// `Config` is initialised once via `OnceLock` at first access, which may
+/// happen long before the post-commit hook runs. Reading the env var at
+/// init time would capture the wrong process environment. This function
+/// re-reads both sources every time it is called so the values are fresh.
+///
+/// # Example env var
+/// ```sh
+/// export GIT_AI_CUSTOM_ATTRIBUTES='{"employee_id":"E123","team":"platform","active":true}'
+/// ```
 pub fn load_custom_attributes() -> HashMap<String, serde_json::Value> {
     let file_cfg = load_file_config();
     let mut custom_attributes = file_cfg
