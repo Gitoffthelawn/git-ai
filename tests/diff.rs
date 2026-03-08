@@ -1,9 +1,10 @@
 mod repos;
+use git_ai::authorship::transcript::{AiTranscript, Message};
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{NewCommit, TestRepo};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -313,10 +314,127 @@ fn commit_keys(json: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-fn extract_json_object(output: &str) -> String {
-    let start = output.find('{').unwrap_or(0);
-    let end = output.rfind('}').unwrap_or(output.len().saturating_sub(1));
-    output[start..=end].to_string()
+fn write_lines(repo: &TestRepo, file_path: &str, lines: &[&str]) {
+    let full_path = repo.path().join(file_path);
+    let mut contents = lines.join("\n");
+    if !contents.is_empty() {
+        contents.push('\n');
+    }
+    fs::write(full_path, contents).expect("writing test file should succeed");
+}
+
+fn checkpoint_agent_v1(
+    repo: &TestRepo,
+    file_path: &str,
+    tool: &str,
+    model: &str,
+    conversation_id: &str,
+    label: &str,
+) {
+    let mut transcript = AiTranscript::new();
+    transcript.add_message(Message::user(label.to_string(), None));
+    transcript.add_message(Message::assistant(
+        "Applying requested changes".to_string(),
+        None,
+    ));
+
+    let hook_input = serde_json::json!({
+        "type": "ai_agent",
+        "repo_working_dir": repo.path().to_str().unwrap(),
+        "edited_filepaths": vec![file_path],
+        "transcript": transcript,
+        "agent_name": tool,
+        "model": model,
+        "conversation_id": conversation_id,
+    });
+    let hook_input_str = serde_json::to_string(&hook_input).expect("hook input should serialize");
+
+    repo.git_ai(&["checkpoint", "agent-v1", "--hook-input", &hook_input_str])
+        .expect("agent-v1 checkpoint should succeed");
+}
+
+fn checkpoint_human(repo: &TestRepo) {
+    repo.git_ai(&["checkpoint"])
+        .expect("human checkpoint should succeed");
+}
+
+fn commit_after_staging_all(repo: &TestRepo, message: &str) -> NewCommit {
+    repo.git(&["add", "-A"]).expect("git add should succeed");
+    repo.commit(message).expect("commit should succeed")
+}
+
+fn diff_json(repo: &TestRepo, args: &[&str]) -> Value {
+    let output = repo.git_ai(args).expect("git-ai diff should succeed");
+    serde_json::from_str(&output).expect("diff JSON should parse")
+}
+
+fn tool_model_stats(
+    ai_lines_added: u64,
+    ai_lines_generated: u64,
+    ai_deletions_generated: u64,
+) -> Value {
+    serde_json::json!({
+        "ai_lines_added": ai_lines_added,
+        "ai_lines_generated": ai_lines_generated,
+        "ai_deletions_generated": ai_deletions_generated
+    })
+}
+
+fn assert_stats_exact(
+    commit_stats: &Value,
+    expected_top_level: &Value,
+    expected_breakdown: &BTreeMap<String, Value>,
+) {
+    assert_eq!(
+        commit_stats["ai_lines_added"], expected_top_level["ai_lines_added"],
+        "ai_lines_added mismatch"
+    );
+    assert_eq!(
+        commit_stats["ai_lines_generated"], expected_top_level["ai_lines_generated"],
+        "ai_lines_generated mismatch"
+    );
+    assert_eq!(
+        commit_stats["ai_deletions_generated"], expected_top_level["ai_deletions_generated"],
+        "ai_deletions_generated mismatch"
+    );
+    assert_eq!(
+        commit_stats["human_lines_added"], expected_top_level["human_lines_added"],
+        "human_lines_added mismatch"
+    );
+    assert_eq!(
+        commit_stats["unknown_lines_added"], expected_top_level["unknown_lines_added"],
+        "unknown_lines_added mismatch"
+    );
+    assert_eq!(
+        commit_stats["git_lines_added"], expected_top_level["git_lines_added"],
+        "git_lines_added mismatch"
+    );
+    assert_eq!(
+        commit_stats["git_lines_deleted"], expected_top_level["git_lines_deleted"],
+        "git_lines_deleted mismatch"
+    );
+
+    let actual_breakdown = commit_stats["tool_model_breakdown"]
+        .as_object()
+        .expect("tool_model_breakdown should be an object");
+    assert_eq!(
+        actual_breakdown.len(),
+        expected_breakdown.len(),
+        "tool_model_breakdown entry count mismatch: actual={:?}, expected={:?}",
+        actual_breakdown.keys().collect::<Vec<_>>(),
+        expected_breakdown.keys().collect::<Vec<_>>()
+    );
+
+    for (key, expected_stats) in expected_breakdown {
+        let actual_stats = actual_breakdown
+            .get(key)
+            .unwrap_or_else(|| panic!("Missing tool_model_breakdown entry for {}", key));
+        assert_eq!(
+            actual_stats, expected_stats,
+            "tool_model_breakdown mismatch for {}",
+            key
+        );
+    }
 }
 
 fn configure_repo_external_diff_helper(repo: &TestRepo) -> String {
@@ -931,33 +1049,481 @@ fn test_diff_json_omits_commit_stats_without_include_stats_flag() {
 }
 
 #[test]
-fn test_diff_json_include_stats_matches_stats_command() {
+fn test_diff_json_all_prompts_includes_non_landing_prompts() {
     let repo = TestRepo::new();
 
-    let mut file = repo.filename("stats_present.txt");
-    file.set_contents(lines!["base".human()]);
-    repo.stage_all_and_commit("Initial").unwrap();
+    write_lines(&repo, "all_prompts.txt", &["base"]);
+    checkpoint_human(&repo);
+    let _base = commit_after_staging_all(&repo, "base");
 
-    file.set_contents(lines!["base".human(), "ai line 1".ai(), "ai line 2".ai()]);
-    let commit = repo.stage_all_and_commit("Add AI lines").unwrap();
+    // Landed AI prompt: cursor::gpt-4o
+    write_lines(&repo, "all_prompts.txt", &["base", "cursor landed"]);
+    checkpoint_agent_v1(
+        &repo,
+        "all_prompts.txt",
+        "cursor",
+        "gpt-4o",
+        "cursor-conv",
+        "cursor landed edit",
+    );
 
-    let diff_output = repo
-        .git_ai(&["diff", &commit.commit_sha, "--json", "--include-stats"])
-        .expect("git-ai diff --json --include-stats should succeed");
-    let diff_json: Value = serde_json::from_str(&diff_output).expect("diff JSON should parse");
+    // Landed AI prompt: codex::o3
+    write_lines(
+        &repo,
+        "all_prompts.txt",
+        &["base", "cursor landed", "codex landed"],
+    );
+    checkpoint_agent_v1(
+        &repo,
+        "all_prompts.txt",
+        "codex",
+        "o3",
+        "codex-conv",
+        "codex landed edit",
+    );
 
-    let stats_output = repo
-        .git_ai(&["stats", &commit.commit_sha, "--json"])
-        .expect("git-ai stats --json should succeed");
-    let stats_json_raw = extract_json_object(&stats_output);
-    let stats_json: Value = serde_json::from_str(&stats_json_raw).expect("stats JSON should parse");
+    // Non-landing AI prompt: claude::sonnet (added then removed before commit)
+    write_lines(
+        &repo,
+        "all_prompts.txt",
+        &["base", "cursor landed", "codex landed", "claude temp"],
+    );
+    checkpoint_agent_v1(
+        &repo,
+        "all_prompts.txt",
+        "claude",
+        "sonnet",
+        "claude-conv",
+        "temporary claude edit",
+    );
+    write_lines(
+        &repo,
+        "all_prompts.txt",
+        &["base", "cursor landed", "codex landed"],
+    );
+    checkpoint_human(&repo);
 
-    let commit_stats = diff_json
-        .get("commit_stats")
-        .expect("diff JSON should include commit_stats");
+    let commit = commit_after_staging_all(&repo, "all-prompts target");
+
+    let all_prompt_ids: BTreeSet<String> = commit
+        .authorship_log
+        .metadata
+        .prompts
+        .keys()
+        .cloned()
+        .collect();
     assert_eq!(
-        commit_stats, &stats_json,
-        "commit_stats in diff JSON should reuse git-ai stats output"
+        all_prompt_ids.len(),
+        3,
+        "expected three prompts in authorship note"
+    );
+
+    let claude_prompt_id = commit
+        .authorship_log
+        .metadata
+        .prompts
+        .iter()
+        .find_map(|(prompt_id, prompt)| {
+            (prompt.agent_id.tool == "claude" && prompt.agent_id.model == "sonnet")
+                .then_some(prompt_id.clone())
+        })
+        .expect("expected non-landing claude prompt in authorship note");
+
+    let without_all_prompts = diff_json(&repo, &["diff", &commit.commit_sha, "--json"]);
+    let without_ids: BTreeSet<String> = without_all_prompts["prompts"]
+        .as_object()
+        .expect("prompts should be an object")
+        .keys()
+        .cloned()
+        .collect();
+    assert!(
+        !without_ids.contains(&claude_prompt_id),
+        "non-landing prompt should be omitted without --all-prompts"
+    );
+
+    let with_all_prompts = diff_json(
+        &repo,
+        &["diff", &commit.commit_sha, "--json", "--all-prompts"],
+    );
+    let with_ids: BTreeSet<String> = with_all_prompts["prompts"]
+        .as_object()
+        .expect("prompts should be an object")
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(
+        with_ids, all_prompt_ids,
+        "--all-prompts should return exactly all prompts from authorship note"
+    );
+    assert!(
+        with_ids.contains(&claude_prompt_id),
+        "--all-prompts should include non-landing prompt"
+    );
+}
+
+#[test]
+fn test_diff_json_include_stats_exact_single_model_counts() {
+    let repo = TestRepo::new();
+
+    write_lines(
+        &repo,
+        "single_model_stats.txt",
+        &["base-1", "base-2", "base-3", "base-4"],
+    );
+    checkpoint_human(&repo);
+    let _base = commit_after_staging_all(&repo, "base");
+
+    // Math:
+    // - Landed diff: +2 AI lines, -2 lines
+    // - Prompt generated totals: +2, -2
+    write_lines(
+        &repo,
+        "single_model_stats.txt",
+        &["base-1", "cursor-ai-1", "cursor-ai-2", "base-4"],
+    );
+    checkpoint_agent_v1(
+        &repo,
+        "single_model_stats.txt",
+        "cursor",
+        "gpt-4o",
+        "single-model-conv",
+        "replace two lines",
+    );
+
+    let commit = commit_after_staging_all(&repo, "single model stats target");
+    let diff = diff_json(
+        &repo,
+        &["diff", &commit.commit_sha, "--json", "--include-stats"],
+    );
+    let commit_stats = diff
+        .get("commit_stats")
+        .expect("commit_stats should be present with --include-stats");
+
+    let expected_top_level = serde_json::json!({
+        "ai_lines_added": 2,
+        "ai_lines_generated": 2,
+        "ai_deletions_generated": 2,
+        "human_lines_added": 0,
+        "unknown_lines_added": 0,
+        "git_lines_added": 2,
+        "git_lines_deleted": 2
+    });
+    let expected_breakdown =
+        BTreeMap::from([("cursor::gpt-4o".to_string(), tool_model_stats(2, 2, 2))]);
+    assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
+}
+
+#[test]
+fn test_diff_json_include_stats_exact_multi_model_with_non_landing_prompt() {
+    let repo = TestRepo::new();
+
+    write_lines(&repo, "multi_model_stats.txt", &["base"]);
+    checkpoint_human(&repo);
+    let _base = commit_after_staging_all(&repo, "base");
+
+    // cursor::gpt-4o adds 3 lines
+    write_lines(
+        &repo,
+        "multi_model_stats.txt",
+        &["base", "cursor-1", "cursor-2", "cursor-3"],
+    );
+    checkpoint_agent_v1(
+        &repo,
+        "multi_model_stats.txt",
+        "cursor",
+        "gpt-4o",
+        "cursor-main-conv",
+        "cursor adds three lines",
+    );
+
+    // codex::o3 adds 2 lines
+    write_lines(
+        &repo,
+        "multi_model_stats.txt",
+        &[
+            "base", "cursor-1", "cursor-2", "cursor-3", "codex-a", "codex-b",
+        ],
+    );
+    checkpoint_agent_v1(
+        &repo,
+        "multi_model_stats.txt",
+        "codex",
+        "o3",
+        "codex-main-conv",
+        "codex adds two lines",
+    );
+
+    // Same codex prompt does delete 1 + add 1 (net 0)
+    write_lines(
+        &repo,
+        "multi_model_stats.txt",
+        &[
+            "base", "cursor-1", "cursor-2", "cursor-3", "codex-a", "codex-b2",
+        ],
+    );
+    checkpoint_agent_v1(
+        &repo,
+        "multi_model_stats.txt",
+        "codex",
+        "o3",
+        "codex-main-conv",
+        "codex replaces one line",
+    );
+
+    // Non-landing claude::sonnet prompt (+1 generated, 0 landed)
+    write_lines(
+        &repo,
+        "multi_model_stats.txt",
+        &[
+            "base",
+            "cursor-1",
+            "cursor-2",
+            "cursor-3",
+            "codex-a",
+            "codex-b2",
+            "claude-temp",
+        ],
+    );
+    checkpoint_agent_v1(
+        &repo,
+        "multi_model_stats.txt",
+        "claude",
+        "sonnet",
+        "claude-temp-conv",
+        "temporary claude line",
+    );
+
+    // Human override of one cursor line and remove claude temp line
+    write_lines(
+        &repo,
+        "multi_model_stats.txt",
+        &[
+            "base",
+            "cursor-1",
+            "human-override",
+            "cursor-3",
+            "codex-a",
+            "codex-b2",
+        ],
+    );
+    checkpoint_human(&repo);
+
+    let commit = commit_after_staging_all(&repo, "multi model stats target");
+    let diff = diff_json(
+        &repo,
+        &["diff", &commit.commit_sha, "--json", "--include-stats"],
+    );
+    let commit_stats = diff
+        .get("commit_stats")
+        .expect("commit_stats should be present with --include-stats");
+
+    // Math ledger:
+    // - Landed additions in final diff: 5 total
+    //   - AI landed: 4 (cursor-1, cursor-3, codex-a, codex-b2)
+    //   - Human landed: 1 (human-override)
+    // - Landed deletions in final diff: 0
+    // - Generated by prompts:
+    //   - cursor::gpt-4o => +3, -0
+    //   - codex::o3 => +3, -1
+    //   - claude::sonnet => +1, -0 (non-landing)
+    // => totals: ai_lines_generated=7, ai_deletions_generated=1
+    let expected_top_level = serde_json::json!({
+        "ai_lines_added": 4,
+        "ai_lines_generated": 7,
+        "ai_deletions_generated": 1,
+        "human_lines_added": 1,
+        "unknown_lines_added": 0,
+        "git_lines_added": 5,
+        "git_lines_deleted": 0
+    });
+    let expected_breakdown = BTreeMap::from([
+        ("claude::sonnet".to_string(), tool_model_stats(0, 1, 0)),
+        ("codex::o3".to_string(), tool_model_stats(2, 3, 1)),
+        ("cursor::gpt-4o".to_string(), tool_model_stats(2, 3, 0)),
+    ]);
+    assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
+
+    let prompts_without_all = diff["prompts"]
+        .as_object()
+        .expect("prompts should be object");
+    assert_eq!(
+        prompts_without_all.len(),
+        2,
+        "without --all-prompts, only landed prompt records should be returned"
+    );
+    assert!(
+        !prompts_without_all.values().any(|prompt| {
+            prompt["agent_id"]["tool"] == "claude" && prompt["agent_id"]["model"] == "sonnet"
+        }),
+        "non-landing prompt should not be present in prompts map without --all-prompts"
+    );
+}
+
+#[test]
+fn test_diff_json_include_stats_exact_human_landed_with_ai_generated() {
+    let repo = TestRepo::new();
+
+    write_lines(&repo, "human_landed_stats.txt", &["base"]);
+    checkpoint_human(&repo);
+    let _base = commit_after_staging_all(&repo, "base");
+
+    // AI generates two lines, human rewrites both before commit.
+    write_lines(
+        &repo,
+        "human_landed_stats.txt",
+        &["base", "ai-temp-1", "ai-temp-2"],
+    );
+    checkpoint_agent_v1(
+        &repo,
+        "human_landed_stats.txt",
+        "cursor",
+        "gpt-4o",
+        "human-landed-conv",
+        "temporary ai lines",
+    );
+
+    write_lines(
+        &repo,
+        "human_landed_stats.txt",
+        &["base", "human-final-1", "human-final-2"],
+    );
+    checkpoint_human(&repo);
+
+    let commit = commit_after_staging_all(&repo, "human landed target");
+    let diff = diff_json(
+        &repo,
+        &["diff", &commit.commit_sha, "--json", "--include-stats"],
+    );
+    let commit_stats = diff
+        .get("commit_stats")
+        .expect("commit_stats should be present with --include-stats");
+
+    let expected_top_level = serde_json::json!({
+        "ai_lines_added": 0,
+        "ai_lines_generated": 2,
+        "ai_deletions_generated": 0,
+        "human_lines_added": 2,
+        "unknown_lines_added": 0,
+        "git_lines_added": 2,
+        "git_lines_deleted": 0
+    });
+    let expected_breakdown =
+        BTreeMap::from([("cursor::gpt-4o".to_string(), tool_model_stats(0, 2, 0))]);
+    assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
+}
+
+#[test]
+fn test_diff_json_rename_only_has_no_hunks_and_zero_stats() {
+    let repo = TestRepo::new();
+
+    write_lines(&repo, "rename_old.txt", &["line-1", "line-2"]);
+    checkpoint_human(&repo);
+    let _base = commit_after_staging_all(&repo, "base");
+
+    repo.git(&["mv", "rename_old.txt", "rename_new.txt"])
+        .expect("git mv should succeed");
+    checkpoint_human(&repo);
+    let commit = commit_after_staging_all(&repo, "rename only");
+
+    let diff = diff_json(
+        &repo,
+        &["diff", &commit.commit_sha, "--json", "--include-stats"],
+    );
+
+    let hunks = diff["hunks"].as_array().expect("hunks should be an array");
+    assert!(
+        hunks.is_empty(),
+        "rename-only commit should not produce add/delete hunks"
+    );
+
+    let commit_stats = diff
+        .get("commit_stats")
+        .expect("commit_stats should be present");
+    let expected_top_level = serde_json::json!({
+        "ai_lines_added": 0,
+        "ai_lines_generated": 0,
+        "ai_deletions_generated": 0,
+        "human_lines_added": 0,
+        "unknown_lines_added": 0,
+        "git_lines_added": 0,
+        "git_lines_deleted": 0
+    });
+    let expected_breakdown: BTreeMap<String, Value> = BTreeMap::new();
+    assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
+
+    let files = diff["files"].as_object().expect("files should be object");
+    assert!(
+        !files.is_empty(),
+        "rename-only commit should still include a file diff section"
+    );
+    assert!(
+        files.values().any(|file| {
+            let text = file["diff"].as_str().unwrap_or("");
+            text.contains("rename from rename_old.txt") && text.contains("rename to rename_new.txt")
+        }),
+        "rename-only diff should include rename metadata"
+    );
+}
+
+#[test]
+fn test_diff_json_rename_with_ai_edit_exact_stats() {
+    let repo = TestRepo::new();
+
+    write_lines(&repo, "rename_edit_old.txt", &["base-1", "base-2"]);
+    checkpoint_human(&repo);
+    let _base = commit_after_staging_all(&repo, "base");
+
+    repo.git(&["mv", "rename_edit_old.txt", "rename_edit_new.txt"])
+        .expect("git mv should succeed");
+    write_lines(
+        &repo,
+        "rename_edit_new.txt",
+        &["base-1", "ai-line-2", "ai-line-3"],
+    );
+    checkpoint_agent_v1(
+        &repo,
+        "rename_edit_new.txt",
+        "cursor",
+        "gpt-4o",
+        "rename-edit-conv",
+        "rename and edit",
+    );
+    let commit = commit_after_staging_all(&repo, "rename with ai edit");
+
+    let diff = diff_json(
+        &repo,
+        &["diff", &commit.commit_sha, "--json", "--include-stats"],
+    );
+    let commit_stats = diff
+        .get("commit_stats")
+        .expect("commit_stats should be present");
+
+    // Math ledger:
+    // old: [base-1, base-2]
+    // new: [base-1, ai-line-2, ai-line-3]
+    // => landed +2, -1 (all AI-attributed additions)
+    // => prompt totals +3, -0 (checkpoint rewrites full new file)
+    let expected_top_level = serde_json::json!({
+        "ai_lines_added": 2,
+        "ai_lines_generated": 3,
+        "ai_deletions_generated": 0,
+        "human_lines_added": 0,
+        "unknown_lines_added": 0,
+        "git_lines_added": 2,
+        "git_lines_deleted": 1
+    });
+    let expected_breakdown =
+        BTreeMap::from([("cursor::gpt-4o".to_string(), tool_model_stats(2, 3, 0))]);
+    assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
+
+    let files = diff["files"].as_object().expect("files should be object");
+    assert!(
+        files.values().any(|file| {
+            let text = file["diff"].as_str().unwrap_or("");
+            text.contains("rename from rename_edit_old.txt")
+                && text.contains("rename to rename_edit_new.txt")
+        }),
+        "rename+edit diff should include rename metadata"
     );
 }
 
@@ -1824,7 +2390,12 @@ reuse_tests_in_worktree!(
     test_diff_error_on_no_args,
     test_diff_json_output_with_escaped_newlines,
     test_diff_json_omits_commit_stats_without_include_stats_flag,
-    test_diff_json_include_stats_matches_stats_command,
+    test_diff_json_all_prompts_includes_non_landing_prompts,
+    test_diff_json_include_stats_exact_single_model_counts,
+    test_diff_json_include_stats_exact_multi_model_with_non_landing_prompt,
+    test_diff_json_include_stats_exact_human_landed_with_ai_generated,
+    test_diff_json_rename_only_has_no_hunks_and_zero_stats,
+    test_diff_json_rename_with_ai_edit_exact_stats,
     test_diff_json_include_stats_rejects_commit_ranges,
     test_diff_preserves_context_lines,
     test_diff_exact_sequence_verification,

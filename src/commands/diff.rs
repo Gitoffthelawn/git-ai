@@ -2,10 +2,9 @@ use crate::authorship::authorship_log::{LineRange, PromptRecord};
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
-use crate::authorship::stats::{CommitStats, stats_for_commit_stats};
 use crate::commands::blame::GitAiBlameOptions;
 use crate::error::GitAiError;
-use crate::git::refs::show_authorship_note;
+use crate::git::refs::{get_authorship, show_authorship_note};
 use crate::git::repository::{InternalGitProfile, Repository, exec_git_with_profile};
 use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -47,6 +46,7 @@ pub struct DiffCommandOptions {
     pub blame_deletions: bool,
     pub blame_deletions_since: Option<String>,
     pub include_stats: bool,
+    pub all_prompts: bool,
 }
 
 impl Default for DiffCommandOptions {
@@ -56,6 +56,7 @@ impl Default for DiffCommandOptions {
             blame_deletions: false,
             blame_deletions_since: None,
             include_stats: false,
+            all_prompts: false,
         }
     }
 }
@@ -88,7 +89,37 @@ pub struct DiffJson {
     pub commits: BTreeMap<String, DiffCommitMetadata>,
     /// Optional commit stats for single-commit diffs (`--json --include-stats`)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit_stats: Option<CommitStats>,
+    pub commit_stats: Option<DiffCommitStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct DiffToolModelStats {
+    #[serde(default)]
+    pub ai_lines_added: u32,
+    #[serde(default)]
+    pub ai_lines_generated: u32,
+    #[serde(default)]
+    pub ai_deletions_generated: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct DiffCommitStats {
+    #[serde(default)]
+    pub ai_lines_added: u32,
+    #[serde(default)]
+    pub ai_lines_generated: u32,
+    #[serde(default)]
+    pub ai_deletions_generated: u32,
+    #[serde(default)]
+    pub human_lines_added: u32,
+    #[serde(default)]
+    pub unknown_lines_added: u32,
+    #[serde(default)]
+    pub git_lines_added: u32,
+    #[serde(default)]
+    pub git_lines_deleted: u32,
+    #[serde(default)]
+    pub tool_model_breakdown: BTreeMap<String, DiffToolModelStats>,
 }
 
 /// Per-file diff information in JSON output
@@ -207,6 +238,10 @@ pub fn parse_diff_args(args: &[String]) -> Result<ParsedDiffArgs, GitAiError> {
                 options.include_stats = true;
                 i += 1;
             }
+            "--all-prompts" => {
+                options.all_prompts = true;
+                i += 1;
+            }
             arg if arg.starts_with("--") => {
                 return Err(GitAiError::Generic(format!("Unknown option: {}", arg)));
             }
@@ -225,6 +260,11 @@ pub fn parse_diff_args(args: &[String]) -> Result<ParsedDiffArgs, GitAiError> {
     if options.include_stats && !matches!(options.format, DiffFormat::Json) {
         return Err(GitAiError::Generic(
             "--include-stats requires --json".to_string(),
+        ));
+    }
+    if options.all_prompts && !matches!(options.format, DiffFormat::Json) {
+        return Err(GitAiError::Generic(
+            "--all-prompts requires --json".to_string(),
         ));
     }
 
@@ -269,6 +309,11 @@ pub fn parse_diff_args(args: &[String]) -> Result<ParsedDiffArgs, GitAiError> {
             "--include-stats is only supported for single-commit diffs".to_string(),
         ));
     }
+    if options.all_prompts && matches!(spec, DiffSpec::TwoCommit(_, _)) {
+        return Err(GitAiError::Generic(
+            "--all-prompts is only supported for single-commit diffs".to_string(),
+        ));
+    }
 
     Ok(ParsedDiffArgs { spec, options })
 }
@@ -278,6 +323,8 @@ pub fn parse_diff_args(args: &[String]) -> Result<ParsedDiffArgs, GitAiError> {
 // ============================================================================
 
 pub fn execute_diff(repo: &Repository, parsed: ParsedDiffArgs) -> Result<String, GitAiError> {
+    let is_single_commit = matches!(&parsed.spec, DiffSpec::SingleCommit(_));
+
     // Resolve commits to get from/to SHAs
     let (from_commit, to_commit) = match parsed.spec {
         DiffSpec::TwoCommit(start, end) => {
@@ -300,18 +347,33 @@ pub fn execute_diff(repo: &Repository, parsed: ParsedDiffArgs) -> Result<String,
     // Format and output annotated diff
     let output = match parsed.options.format {
         DiffFormat::Json => {
+            let mut output_prompts = artifacts.prompts.clone();
+            if is_single_commit && parsed.options.all_prompts {
+                merge_missing_prompts_from_authorship_note(repo, &to_commit, &mut output_prompts);
+            }
+
             let commit_stats = if parsed.options.include_stats {
-                let effective_patterns = effective_ignore_patterns(repo, &[], &[]);
-                Some(stats_for_commit_stats(
-                    repo,
-                    &to_commit,
-                    &effective_patterns,
-                )?)
+                let mut stats_prompts = output_prompts.clone();
+                if is_single_commit && !parsed.options.all_prompts {
+                    merge_missing_prompts_from_authorship_note(
+                        repo,
+                        &to_commit,
+                        &mut stats_prompts,
+                    );
+                }
+                Some(calculate_diff_commit_stats(&artifacts, &stats_prompts))
             } else {
                 None
             };
-            let diff_json =
-                build_diff_json(repo, &from_commit, &to_commit, &artifacts, commit_stats)?;
+
+            let diff_json = build_diff_json(
+                repo,
+                &from_commit,
+                &to_commit,
+                &artifacts,
+                &output_prompts,
+                commit_stats,
+            )?;
             serde_json::to_string(&diff_json)
                 .map_err(|e| GitAiError::Generic(format!("Failed to serialize JSON: {}", e)))?
         }
@@ -407,8 +469,10 @@ fn get_diff_text(
     if zero_context {
         args.push("-U0".to_string()); // No context lines, just changes
     }
+    // Use permissive rename detection so rename+edit commits are represented
+    // as renames with edit hunks instead of delete/add file pairs.
+    args.push("--find-renames=1%".to_string());
     args.push("--no-color".to_string());
-    args.push("--no-renames".to_string());
     args.push(from.to_string());
     args.push(to.to_string());
 
@@ -434,8 +498,13 @@ fn parse_diff_hunks(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
     for line in diff_text.lines() {
         if line.starts_with("diff --git ") {
             flush_current_hunk(&mut hunks, &mut current_hunk);
-            current_old_file = None;
-            current_file.clear();
+            if let Some((old_file, new_file)) = parse_diff_git_header_paths(line) {
+                current_old_file = Some(old_file);
+                current_file = new_file;
+            } else {
+                current_old_file = None;
+                current_file.clear();
+            }
             continue;
         }
 
@@ -511,6 +580,68 @@ fn parse_file_path_from_header_line(line: &str, prefix: &str) -> Option<Option<S
         return Some(None);
     }
     Some(Some(normalize_diff_path_token(raw)))
+}
+
+fn parse_diff_git_header_paths(line: &str) -> Option<(String, String)> {
+    let raw = line.strip_prefix("diff --git ")?;
+    let (old_raw, new_raw) = parse_two_git_path_tokens(raw)?;
+    Some((
+        normalize_diff_path_token(&old_raw),
+        normalize_diff_path_token(&new_raw),
+    ))
+}
+
+fn parse_two_git_path_tokens(raw: &str) -> Option<(String, String)> {
+    let mut chars = raw.chars().peekable();
+    let mut tokens: Vec<String> = Vec::new();
+
+    while tokens.len() < 2 {
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+
+        let mut token = String::new();
+        if chars.peek() == Some(&'"') {
+            token.push(chars.next().unwrap_or('"'));
+            let mut escaped = false;
+            for ch in chars.by_ref() {
+                token.push(ch);
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if ch == '"' {
+                    break;
+                }
+            }
+        } else {
+            while let Some(&ch) = chars.peek() {
+                if ch.is_whitespace() {
+                    break;
+                }
+                token.push(ch);
+                chars.next();
+            }
+        }
+
+        if token.is_empty() {
+            return None;
+        }
+        tokens.push(token);
+    }
+
+    if tokens.len() == 2 {
+        Some((tokens[0].clone(), tokens[1].clone()))
+    } else {
+        None
+    }
 }
 
 fn parse_hunk_line(line: &str, file_path: &str) -> Result<Option<DiffHunk>, GitAiError> {
@@ -608,14 +739,21 @@ fn build_diff_artifacts(
 ) -> Result<DiffBuildArtifacts, GitAiError> {
     let effective_patterns = effective_ignore_patterns(repo, &[], &[]);
     let ignore_matcher = build_ignore_matcher(&effective_patterns);
+    let diff_sections = get_diff_sections_by_file(repo, from_commit, to_commit)?;
+    let mut included_files: HashSet<String> = diff_sections
+        .into_iter()
+        .map(|(file_path, _)| file_path)
+        .filter(|file_path| {
+            !file_path.is_empty() && !should_ignore_file_with_matcher(file_path, &ignore_matcher)
+        })
+        .collect();
 
     let mut hunks = get_diff_with_line_numbers(repo, from_commit, to_commit)?;
     hunks.retain(|hunk| {
         !hunk.file_path.is_empty()
             && !should_ignore_file_with_matcher(&hunk.file_path, &ignore_matcher)
     });
-
-    let included_files: HashSet<String> = hunks.iter().map(|h| h.file_path.clone()).collect();
+    included_files.extend(hunks.iter().map(|h| h.file_path.clone()));
     let line_contents = build_line_content_map(&hunks);
 
     let (annotations_by_file, attributions, line_details, prompts, mut commits) =
@@ -1136,6 +1274,86 @@ fn load_commit_metadata(
     })
 }
 
+fn merge_missing_prompts_from_authorship_note(
+    repo: &Repository,
+    commit_sha: &str,
+    prompts: &mut BTreeMap<String, PromptRecord>,
+) {
+    if let Some(authorship_log) = get_authorship(repo, commit_sha) {
+        for (prompt_id, prompt_record) in authorship_log.metadata.prompts {
+            prompts.entry(prompt_id).or_insert(prompt_record);
+        }
+    }
+}
+
+fn line_range_len(range: &LineRange) -> u32 {
+    match range {
+        LineRange::Single(_) => 1,
+        LineRange::Range(start, end) => end.saturating_sub(*start) + 1,
+    }
+}
+
+fn calculate_diff_commit_stats(
+    artifacts: &DiffBuildArtifacts,
+    prompts: &BTreeMap<String, PromptRecord>,
+) -> DiffCommitStats {
+    let mut stats = DiffCommitStats::default();
+    let mut ai_lines_added_by_tool_model: BTreeMap<String, u32> = BTreeMap::new();
+
+    for annotations in artifacts.annotations_by_file.values() {
+        for (prompt_id, ranges) in annotations {
+            let landed_lines = ranges.iter().map(line_range_len).sum::<u32>();
+            stats.ai_lines_added += landed_lines;
+            if let Some(prompt_record) = prompts.get(prompt_id) {
+                let key = format!(
+                    "{}::{}",
+                    prompt_record.agent_id.tool, prompt_record.agent_id.model
+                );
+                *ai_lines_added_by_tool_model.entry(key).or_default() += landed_lines;
+            }
+        }
+    }
+
+    for (line_key, attribution) in &artifacts.attributions {
+        if !matches!(line_key.side, LineSide::New) {
+            continue;
+        }
+        match attribution {
+            Attribution::Human(_) => stats.human_lines_added += 1,
+            Attribution::NoData => stats.unknown_lines_added += 1,
+            Attribution::Ai(_) => {}
+        }
+    }
+    stats.git_lines_added =
+        stats.ai_lines_added + stats.human_lines_added + stats.unknown_lines_added;
+
+    for hunk in &artifacts.json_hunks {
+        if hunk.hunk_kind == "deletion" {
+            stats.git_lines_deleted += hunk.end_line.saturating_sub(hunk.start_line) + 1;
+        }
+    }
+
+    for prompt_record in prompts.values() {
+        stats.ai_lines_generated += prompt_record.total_additions;
+        stats.ai_deletions_generated += prompt_record.total_deletions;
+
+        let key = format!(
+            "{}::{}",
+            prompt_record.agent_id.tool, prompt_record.agent_id.model
+        );
+        let tool_stats = stats.tool_model_breakdown.entry(key).or_default();
+        tool_stats.ai_lines_generated += prompt_record.total_additions;
+        tool_stats.ai_deletions_generated += prompt_record.total_deletions;
+    }
+
+    for (key, ai_lines_added) in ai_lines_added_by_tool_model {
+        let tool_stats = stats.tool_model_breakdown.entry(key).or_default();
+        tool_stats.ai_lines_added += ai_lines_added;
+    }
+
+    stats
+}
+
 // ============================================================================
 // JSON Output Building
 // ============================================================================
@@ -1146,7 +1364,8 @@ fn build_diff_json(
     from_commit: &str,
     to_commit: &str,
     artifacts: &DiffBuildArtifacts,
-    commit_stats: Option<CommitStats>,
+    prompts: &BTreeMap<String, PromptRecord>,
+    commit_stats: Option<DiffCommitStats>,
 ) -> Result<DiffJson, GitAiError> {
     let mut files: BTreeMap<String, FileDiffJson> = BTreeMap::new();
     let file_diffs = get_diff_split_by_file(repo, from_commit, to_commit)?;
@@ -1178,7 +1397,7 @@ fn build_diff_json(
 
     Ok(DiffJson {
         files,
-        prompts: artifacts.prompts.clone(),
+        prompts: prompts.clone(),
         hunks: artifacts.json_hunks.clone(),
         commits: artifacts.commits.clone(),
         commit_stats,
@@ -1223,7 +1442,13 @@ fn get_diff_sections_by_file(
     for line in diff_text.lines() {
         if line.starts_with("diff --git ") {
             flush_section(&mut sections, &mut current_file, &mut current_diff);
-            current_old_file = None;
+            if let Some((old_file, new_file)) = parse_diff_git_header_paths(line) {
+                current_old_file = Some(old_file);
+                current_file = new_file;
+            } else {
+                current_old_file = None;
+                current_file.clear();
+            }
             current_diff.push_str(line);
             current_diff.push('\n');
             continue;
@@ -1501,7 +1726,14 @@ pub fn get_diff_json_filtered(
         },
     )?;
 
-    let mut diff_json = build_diff_json(repo, &from_commit, &to_commit, &artifacts, None)?;
+    let mut diff_json = build_diff_json(
+        repo,
+        &from_commit,
+        &to_commit,
+        &artifacts,
+        &artifacts.prompts,
+        None,
+    )?;
 
     // Apply filtering if requested
     if options.filter_to_attributed_files
@@ -1553,6 +1785,9 @@ pub fn get_diff_json_filtered(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authorship::transcript::Message;
+    use crate::authorship::working_log::AgentId;
+    use std::collections::{BTreeMap, HashMap, HashSet};
 
     #[test]
     fn test_parse_diff_args_single_commit() {
@@ -1573,6 +1808,7 @@ mod tests {
         assert!(!parsed.options.blame_deletions);
         assert!(parsed.options.blame_deletions_since.is_none());
         assert!(!parsed.options.include_stats);
+        assert!(!parsed.options.all_prompts);
     }
 
     #[test]
@@ -1649,6 +1885,37 @@ mod tests {
             "abc123..def456".to_string(),
             "--json".to_string(),
             "--include-stats".to_string(),
+        ];
+        let result = parse_diff_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_diff_args_all_prompts_requires_json() {
+        let args = vec!["abc123".to_string(), "--all-prompts".to_string()];
+        let result = parse_diff_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_diff_args_all_prompts_single_commit_json() {
+        let args = vec![
+            "abc123".to_string(),
+            "--json".to_string(),
+            "--all-prompts".to_string(),
+        ];
+        let parsed = parse_diff_args(&args).unwrap();
+        assert!(matches!(parsed.spec, DiffSpec::SingleCommit(_)));
+        assert!(matches!(parsed.options.format, DiffFormat::Json));
+        assert!(parsed.options.all_prompts);
+    }
+
+    #[test]
+    fn test_parse_diff_args_all_prompts_rejects_ranges() {
+        let args = vec![
+            "abc123..def456".to_string(),
+            "--json".to_string(),
+            "--all-prompts".to_string(),
         ];
         let result = parse_diff_args(&args);
         assert!(result.is_err());
@@ -1912,5 +2179,114 @@ index abc123..def456 100644
         let result = parse_diff_hunks(diff_text).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].file_path, "DST/file1.rs");
+    }
+
+    #[test]
+    fn test_parse_diff_git_header_paths_standard_and_quoted() {
+        let parsed = parse_diff_git_header_paths("diff --git a/src/lib.rs b/src/lib.rs")
+            .expect("standard diff header should parse");
+        assert_eq!(parsed, ("src/lib.rs".to_string(), "src/lib.rs".to_string()));
+
+        let parsed = parse_diff_git_header_paths(r#"diff --git "a/my file.rs" "b/my file.rs""#)
+            .expect("quoted diff header should parse");
+        assert_eq!(parsed, ("my file.rs".to_string(), "my file.rs".to_string()));
+    }
+
+    #[test]
+    fn test_calculate_diff_commit_stats_tracks_unknown_added_lines() {
+        fn prompt_record(tool: &str, model: &str, additions: u32, deletions: u32) -> PromptRecord {
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: tool.to_string(),
+                    id: format!("{}-id", tool),
+                    model: model.to_string(),
+                },
+                human_author: None,
+                messages: vec![Message::user("u".to_string(), None)],
+                total_additions: additions,
+                total_deletions: deletions,
+                accepted_lines: 0,
+                overriden_lines: 0,
+                messages_url: None,
+            }
+        }
+
+        let mut attributions = HashMap::new();
+        attributions.insert(
+            DiffLineKey {
+                file: "f.rs".to_string(),
+                line: 1,
+                side: LineSide::New,
+            },
+            Attribution::Ai("cursor".to_string()),
+        );
+        attributions.insert(
+            DiffLineKey {
+                file: "f.rs".to_string(),
+                line: 2,
+                side: LineSide::New,
+            },
+            Attribution::Human("alice".to_string()),
+        );
+        attributions.insert(
+            DiffLineKey {
+                file: "f.rs".to_string(),
+                line: 3,
+                side: LineSide::New,
+            },
+            Attribution::NoData,
+        );
+        // Old-side no-data should not affect unknown_lines_added.
+        attributions.insert(
+            DiffLineKey {
+                file: "f.rs".to_string(),
+                line: 10,
+                side: LineSide::Old,
+            },
+            Attribution::NoData,
+        );
+
+        let mut annotations = BTreeMap::new();
+        annotations.insert("p1".to_string(), vec![LineRange::Single(1)]);
+        let mut annotations_by_file = BTreeMap::new();
+        annotations_by_file.insert("f.rs".to_string(), annotations);
+
+        let mut prompts = BTreeMap::new();
+        prompts.insert("p1".to_string(), prompt_record("cursor", "gpt-4o", 5, 2));
+
+        let artifacts = DiffBuildArtifacts {
+            attributions,
+            annotations_by_file,
+            prompts: prompts.clone(),
+            json_hunks: vec![DiffJsonHunk {
+                commit_sha: "abc".to_string(),
+                content_hash: "hash".to_string(),
+                hunk_kind: "deletion".to_string(),
+                original_commit_sha: None,
+                start_line: 5,
+                end_line: 6,
+                file_path: "f.rs".to_string(),
+                prompt_id: None,
+            }],
+            commits: BTreeMap::new(),
+            included_files: HashSet::new(),
+        };
+
+        let stats = calculate_diff_commit_stats(&artifacts, &prompts);
+        assert_eq!(stats.ai_lines_added, 1);
+        assert_eq!(stats.human_lines_added, 1);
+        assert_eq!(stats.unknown_lines_added, 1);
+        assert_eq!(stats.git_lines_added, 3);
+        assert_eq!(stats.git_lines_deleted, 2);
+        assert_eq!(stats.ai_lines_generated, 5);
+        assert_eq!(stats.ai_deletions_generated, 2);
+
+        let breakdown = stats
+            .tool_model_breakdown
+            .get("cursor::gpt-4o")
+            .expect("expected cursor::gpt-4o breakdown entry");
+        assert_eq!(breakdown.ai_lines_added, 1);
+        assert_eq!(breakdown.ai_lines_generated, 5);
+        assert_eq!(breakdown.ai_deletions_generated, 2);
     }
 }

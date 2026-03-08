@@ -218,6 +218,9 @@ fn print_help() {
     eprintln!(
         "    --include-stats        Include commit_stats in JSON output (single commit only)"
     );
+    eprintln!(
+        "    --all-prompts          Include all prompts from commit note in JSON output (single commit only)"
+    );
     eprintln!("  stats [commit]     Show AI authorship statistics for a commit");
     eprintln!("    --json                 Output in JSON format");
     eprintln!("  status             Show uncommitted AI authorship status (debug)");
