@@ -81,6 +81,7 @@ pub struct Config {
     #[serde(serialize_with = "serialize_masked_api_key")]
     api_key: Option<String>,
     quiet: bool,
+    custom_attributes: HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
@@ -390,6 +391,11 @@ impl Config {
         self.quiet
     }
 
+    /// Returns the custom attributes map (from config file + env var override).
+    pub fn custom_attributes(&self) -> &HashMap<String, String> {
+        &self.custom_attributes
+    }
+
     /// Serialize the effective runtime config into pretty JSON.
     /// Sensitive values are redacted via field serializers.
     pub fn to_printable_json_pretty(&self) -> Result<String, String> {
@@ -619,6 +625,9 @@ fn build_config() -> Config {
     // Get quiet setting (defaults to false)
     let quiet = file_cfg.as_ref().and_then(|c| c.quiet).unwrap_or(false);
 
+    // Build custom attributes: file config as base, env var overrides
+    let custom_attributes = build_custom_attributes(&file_cfg);
+
     #[cfg(any(test, feature = "test-support"))]
     {
         let mut config = Config {
@@ -638,6 +647,7 @@ fn build_config() -> Config {
             default_prompt_storage,
             api_key,
             quiet,
+            custom_attributes: custom_attributes.clone(),
         };
         apply_test_config_patch(&mut config);
         config
@@ -661,59 +671,44 @@ fn build_config() -> Config {
         default_prompt_storage,
         api_key,
         quiet,
+        custom_attributes,
     }
 }
 
-/// Load custom attributes on demand from `~/.git-ai/config.json` and/or
-/// the `GIT_AI_CUSTOM_ATTRIBUTES` environment variable.
-///
-/// These key-value pairs are attached to every `PromptRecord` in git notes
-/// and included in metric events (position 30, JSON-encoded). Enterprise
-/// users can use them to tag AI authorship data with organizational metadata
-/// such as employee IDs, device IDs, team names, etc.
-///
-/// All values are strings. When reading from JSON sources, non-string scalar
-/// values (numbers, booleans) are converted to their string representation.
-/// Arrays, objects, and null are silently dropped.
-///
-/// # Resolution order
-/// 1. Read `custom_attributes` from `~/.git-ai/config.json` (if present).
-/// 2. Parse `GIT_AI_CUSTOM_ATTRIBUTES` env var as a JSON object. Env var
-///    keys **override** file config keys on conflict.
-///
-/// # Why this is not part of `Config`
-/// `Config` is initialised once via `OnceLock` at first access, which may
-/// happen long before the post-commit hook runs. Reading the env var at
-/// init time would capture the wrong process environment. This function
-/// re-reads both sources every time it is called so the values are fresh.
-///
-/// # Example env var
-/// ```sh
-/// export GIT_AI_CUSTOM_ATTRIBUTES='{"employee_id":"E123","team":"platform"}'
-/// ```
-pub fn load_custom_attributes() -> HashMap<String, String> {
-    let file_cfg = load_file_config();
-    let mut custom_attributes = file_cfg
+/// Build custom attributes from file config and `GIT_AI_CUSTOM_ATTRIBUTES` env var.
+/// Env var keys override file config keys on conflict.
+fn build_custom_attributes(file_cfg: &Option<FileConfig>) -> HashMap<String, String> {
+    let mut attrs = file_cfg
         .as_ref()
         .and_then(|c| c.custom_attributes.clone())
         .unwrap_or_default();
 
     if let Ok(env_val) = env::var("GIT_AI_CUSTOM_ATTRIBUTES") {
-        if let Ok(env_attrs) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&env_val) {
+        if let Ok(env_attrs) =
+            serde_json::from_str::<HashMap<String, serde_json::Value>>(&env_val)
+        {
             for (k, v) in env_attrs {
                 match v {
-                    serde_json::Value::String(s) => { custom_attributes.insert(k, s); }
-                    serde_json::Value::Number(n) => { custom_attributes.insert(k, n.to_string()); }
-                    serde_json::Value::Bool(b) => { custom_attributes.insert(k, b.to_string()); }
+                    serde_json::Value::String(s) => {
+                        attrs.insert(k, s);
+                    }
+                    serde_json::Value::Number(n) => {
+                        attrs.insert(k, n.to_string());
+                    }
+                    serde_json::Value::Bool(b) => {
+                        attrs.insert(k, b.to_string());
+                    }
                     _ => {} // silently drop arrays, objects, null
                 }
             }
         } else {
-            crate::utils::debug_log("GIT_AI_CUSTOM_ATTRIBUTES is not valid JSON or contains non-string values, ignoring");
+            crate::utils::debug_log(
+                "GIT_AI_CUSTOM_ATTRIBUTES is not valid JSON, ignoring",
+            );
         }
     }
 
-    custom_attributes
+    attrs
 }
 
 fn build_feature_flags(file_cfg: &Option<FileConfig>) -> FeatureFlags {
@@ -985,6 +980,7 @@ mod tests {
             default_prompt_storage: None,
             api_key: None,
             quiet: false,
+            custom_attributes: HashMap::new(),
         }
     }
 
@@ -1092,6 +1088,7 @@ mod tests {
             default_prompt_storage: None,
             api_key: None,
             quiet: false,
+            custom_attributes: HashMap::new(),
         }
     }
 
@@ -1208,6 +1205,7 @@ mod tests {
             default_prompt_storage: default_prompt_storage.map(|s| s.to_string()),
             api_key: None,
             quiet: false,
+            custom_attributes: HashMap::new(),
         }
     }
 
