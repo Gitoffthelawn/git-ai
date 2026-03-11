@@ -293,18 +293,18 @@ if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
 } elseif ($PinnedVersion -ne '__VERSION_PLACEHOLDER__') {
     # Version-pinned install script from a release
     $releaseTag = $PinnedVersion
-    $downloadUrlExe = "https://usegitai.com/worker/releases/download/$releaseTag/$binaryName.exe"
-    $downloadUrlNoExt = "https://usegitai.com/worker/releases/download/$releaseTag/$binaryName"
+    $downloadUrlExe = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName"
 } elseif (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_RELEASE_TAG) -and $env:GIT_AI_RELEASE_TAG -ne 'latest') {
     # Environment variable override
     $releaseTag = $env:GIT_AI_RELEASE_TAG
-    $downloadUrlExe = "https://usegitai.com/worker/releases/download/$releaseTag/$binaryName.exe"
-    $downloadUrlNoExt = "https://usegitai.com/worker/releases/download/$releaseTag/$binaryName"
+    $downloadUrlExe = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/download/$releaseTag/$binaryName"
 } else {
     # Default to latest
     $releaseTag = 'latest'
-    $downloadUrlExe = "https://usegitai.com/worker/releases/download/latest/$binaryName.exe"
-    $downloadUrlNoExt = "https://usegitai.com/worker/releases/download/latest/$binaryName"
+    $downloadUrlExe = "https://github.com/$Repo/releases/latest/download/$binaryName.exe"
+    $downloadUrlNoExt = "https://github.com/$Repo/releases/latest/download/$binaryName"
 }
 
 # Install directory: %USERPROFILE%\.git-ai\bin
