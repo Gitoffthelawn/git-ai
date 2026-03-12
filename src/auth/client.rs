@@ -26,13 +26,11 @@ fn validate_https_url(url: &str) -> Result<(), String> {
         if !url.starts_with("https://") && !url.starts_with("http://") {
             return Err(format!("Invalid URL scheme: {}", url));
         }
-    } else {
-        if !url.starts_with("https://") {
-            return Err(format!(
-                "Security error: OAuth requires HTTPS. URL '{}' is not secure.",
-                url
-            ));
-        }
+    } else if !url.starts_with("https://") {
+        return Err(format!(
+            "Security error: OAuth requires HTTPS. URL '{}' is not secure.",
+            url
+        ));
     }
 
     Ok(())
