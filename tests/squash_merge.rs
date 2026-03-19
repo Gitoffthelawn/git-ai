@@ -115,7 +115,7 @@ fn test_prepare_working_log_squash_with_main_changes() {
         "// Master update at top".human(),
         "section 1".human(),
         "section 2".human(),
-        "section 3".human(),
+        "section 3".ai(),
         "// AI feature addition at end".ai()
     ]);
 
@@ -125,9 +125,9 @@ fn test_prepare_working_log_squash_with_main_changes() {
         stats.git_diff_added_lines, 2,
         "Squash commit adds 2 lines from feature (includes newline)"
     );
-    assert_eq!(stats.ai_additions, 1, "1 AI line from feature branch");
-    assert_eq!(stats.ai_accepted, 1, "1 AI line accepted without edits");
-    assert_eq!(stats.human_additions, 1, "1 human line from feature branch");
+    assert_eq!(stats.ai_additions, 2, "2 AI lines from feature branch");
+    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
+    assert_eq!(stats.human_additions, 0, "0 human lines from feature branch");
     assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
 
@@ -169,7 +169,7 @@ fn test_prepare_working_log_squash_multiple_sessions() {
         "// AI session 1".ai(),
         "body".human(),
         "// Human addition".human(),
-        "footer".human(),
+        "footer".ai(),
         "// AI session 2".ai()
     ]);
 
@@ -180,13 +180,13 @@ fn test_prepare_working_log_squash_multiple_sessions() {
         "Squash commit adds 4 lines total (includes newline)"
     );
     assert_eq!(
-        stats.ai_additions, 2,
-        "2 AI lines from feature branch (both sessions)"
+        stats.ai_additions, 3,
+        "3 AI lines from feature branch (both sessions plus reformatted footer)"
     );
-    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
+    assert_eq!(stats.ai_accepted, 3, "3 AI lines accepted without edits");
     assert_eq!(
-        stats.human_additions, 2,
-        "2 human lines from feature branch"
+        stats.human_additions, 1,
+        "1 human line from feature branch"
     );
     assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
