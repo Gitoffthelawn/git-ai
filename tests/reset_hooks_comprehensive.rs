@@ -386,7 +386,7 @@ fn test_reset_to_current_head_is_noop() {
     assert!(!new_commit.authorship_log.attestations.is_empty());
 
     file = repo.filename("test.txt");
-    file.assert_lines_and_blame(lines!["content".human(), "uncommitted".ai()]);
+    file.assert_lines_and_blame(lines!["content".ai(), "uncommitted".ai()]);
 }
 
 // Test reset deletes working log on --hard
