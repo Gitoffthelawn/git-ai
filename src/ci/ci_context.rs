@@ -196,8 +196,11 @@ impl CiContext {
                     // misclassified (PR notes then land on unrelated commits). Restrict
                     // to commits the merge actually introduced
                     // (`base_sha..merge_commit_sha`; see gitrevisions(7)) — a squash
-                    // yields exactly one, so it can't look like a rebase. An empty
-                    // `base_sha` (currently the GitLab path) keeps the legacy behavior.
+                    // yields exactly one, so it can't look like a rebase. GitHub passes
+                    // `pull_request.base.sha` and GitLab passes `diff_refs.start_sha`
+                    // (the target-branch tip at MR creation); an empty `base_sha`
+                    // (transient API failure on either path) safely skips the filter
+                    // and falls back to the pre-#1473 behavior.
                     if !base_sha.is_empty() {
                         let introduced: std::collections::HashSet<String> =
                             CommitRange::new_infer_refname(
