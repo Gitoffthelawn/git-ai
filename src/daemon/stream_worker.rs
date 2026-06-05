@@ -18,12 +18,14 @@ use crate::streams::watermark::{WatermarkStrategy, WatermarkType};
 use chrono::{TimeZone, Utc};
 use std::collections::{BinaryHeap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::Notify;
 use tokio::time::{Duration, interval};
 
 const PROCESSING_TICK_INTERVAL: Duration = Duration::from_millis(100);
+const TRIGGERED_SWEEP_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// Extract a Unix-epoch u32 timestamp from a raw JSON event's "timestamp" field.
 /// Handles both ISO 8601 strings (e.g. "2026-05-11T23:13:12.819Z") and numeric
@@ -82,10 +84,76 @@ impl Ord for ProcessingTask {
     }
 }
 
-/// Handle for sending checkpoint notifications to the worker.
+/// Source of an explicit transcript sweep request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SweepTrigger {
+    PostCommit,
+    PostPush,
+}
+
+impl std::fmt::Display for SweepTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PostCommit => f.write_str("post_commit"),
+            Self::PostPush => f.write_str("post_push"),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SweepTriggerGate {
+    last_triggered_at: Arc<Mutex<Option<Instant>>>,
+}
+
+impl SweepTriggerGate {
+    fn new() -> Self {
+        Self {
+            last_triggered_at: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn try_trigger_at(
+        &self,
+        now: Instant,
+        source: &str,
+        trigger_action: impl FnOnce() -> bool,
+    ) -> bool {
+        let Ok(mut last_triggered_at) = self.last_triggered_at.lock() else {
+            tracing::warn!("failed to lock transcript sweep trigger cooldown");
+            return false;
+        };
+
+        if let Some(last) = *last_triggered_at {
+            let elapsed = now.checked_duration_since(last).unwrap_or_default();
+            if elapsed < TRIGGERED_SWEEP_COOLDOWN {
+                tracing::debug!(
+                    source,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "transcript sweep trigger suppressed by cooldown"
+                );
+                return false;
+            }
+        }
+
+        if !trigger_action() {
+            return false;
+        }
+
+        *last_triggered_at = Some(now);
+        true
+    }
+
+    fn try_mark_sweep_at(&self, now: Instant, source: &str) -> bool {
+        self.try_trigger_at(now, source, || true)
+    }
+}
+
+/// Handle for sending checkpoint notifications and sweep requests to the worker.
 #[derive(Clone)]
 pub struct StreamWorkerHandle {
     checkpoint_tx: tokio::sync::mpsc::UnboundedSender<CheckpointNotification>,
+    sweep_tx: tokio::sync::mpsc::UnboundedSender<SweepTrigger>,
+    sweep_trigger_gate: SweepTriggerGate,
 }
 
 impl StreamWorkerHandle {
@@ -114,6 +182,30 @@ impl StreamWorkerHandle {
         };
         let _ = self.checkpoint_tx.send(notification);
     }
+
+    /// Request a full sweep unless another sweep was triggered recently.
+    ///
+    /// Returns true when a request was sent to the worker, false when it was
+    /// suppressed by the cooldown or the worker has already stopped.
+    pub fn trigger_sweep(&self, trigger: SweepTrigger) -> bool {
+        self.trigger_sweep_at(trigger, Instant::now())
+    }
+
+    fn trigger_sweep_at(&self, trigger: SweepTrigger, now: Instant) -> bool {
+        let source = trigger.to_string();
+        self.sweep_trigger_gate
+            .try_trigger_at(now, &source, || self.sweep_tx.send(trigger).is_ok())
+    }
+
+    #[cfg(test)]
+    fn for_test_sweep_triggers(sweep_tx: tokio::sync::mpsc::UnboundedSender<SweepTrigger>) -> Self {
+        let (checkpoint_tx, _checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            checkpoint_tx,
+            sweep_tx,
+            sweep_trigger_gate: SweepTriggerGate::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +231,8 @@ struct StreamWorker {
     shutdown_notify: Arc<Notify>,
     shutdown_flag: Arc<AtomicBool>,
     checkpoint_rx: tokio::sync::mpsc::UnboundedReceiver<CheckpointNotification>,
+    sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepTrigger>,
+    sweep_trigger_gate: SweepTriggerGate,
 }
 
 impl StreamWorker {
@@ -149,6 +243,8 @@ impl StreamWorker {
         shutdown_notify: Arc<Notify>,
         shutdown_flag: Arc<AtomicBool>,
         checkpoint_rx: tokio::sync::mpsc::UnboundedReceiver<CheckpointNotification>,
+        sweep_rx: tokio::sync::mpsc::UnboundedReceiver<SweepTrigger>,
+        sweep_trigger_gate: SweepTriggerGate,
     ) -> Self {
         let sweep_coordinator =
             crate::daemon::sweep_coordinator::SweepCoordinator::new(streams_db.clone());
@@ -163,6 +259,8 @@ impl StreamWorker {
             shutdown_notify,
             shutdown_flag,
             checkpoint_rx,
+            sweep_rx,
+            sweep_trigger_gate,
         }
     }
 
@@ -180,7 +278,12 @@ impl StreamWorker {
         sweep_ticker.tick().await;
 
         // Run initial sweep on startup
-        if sweep_enabled && let Err(e) = self.run_sweep().await {
+        if sweep_enabled
+            && self
+                .sweep_trigger_gate
+                .try_mark_sweep_at(Instant::now(), "initial")
+            && let Err(e) = self.run_sweep().await
+        {
             tracing::error!(error = %e, "initial sweep failed");
         }
 
@@ -197,6 +300,9 @@ impl StreamWorker {
                 }
                 _ = sweep_ticker.tick() => {  // NEW: sweep ticker
                     if sweep_enabled
+                        && self
+                            .sweep_trigger_gate
+                            .try_mark_sweep_at(Instant::now(), "periodic")
                         && let Err(e) = self.run_sweep().await
                     {
                         tracing::error!(error = %e, "sweep failed");
@@ -204,6 +310,19 @@ impl StreamWorker {
                 }
                 Some(notification) = self.checkpoint_rx.recv() => {
                     self.handle_checkpoint_notification(notification).await;
+                }
+                Some(trigger) = self.sweep_rx.recv() => {
+                    if sweep_enabled {
+                        tracing::info!(trigger = %trigger, "triggered transcript sweep requested");
+                        if let Err(e) = self.run_sweep().await {
+                            tracing::error!(trigger = %trigger, error = %e, "triggered sweep failed");
+                        }
+                    } else {
+                        tracing::debug!(
+                            trigger = %trigger,
+                            "triggered transcript sweep skipped because transcript_sweep is disabled"
+                        );
+                    }
                 }
             }
         }
@@ -1100,7 +1219,9 @@ pub fn spawn_stream_worker(
     shutdown_notify: Arc<Notify>,
 ) -> StreamWorkerHandle {
     let (checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (sweep_tx, sweep_rx) = tokio::sync::mpsc::unbounded_channel();
     let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let sweep_trigger_gate = SweepTriggerGate::new();
 
     let worker = StreamWorker::new(
         streams_db,
@@ -1108,13 +1229,19 @@ pub fn spawn_stream_worker(
         shutdown_notify,
         shutdown_flag,
         checkpoint_rx,
+        sweep_rx,
+        sweep_trigger_gate.clone(),
     );
 
     tokio::spawn(async move {
         worker.run().await;
     });
 
-    StreamWorkerHandle { checkpoint_tx }
+    StreamWorkerHandle {
+        checkpoint_tx,
+        sweep_tx,
+        sweep_trigger_gate,
+    }
 }
 
 #[cfg(test)]
@@ -1174,14 +1301,60 @@ mod extract_event_timestamp_tests {
 mod subagent_sweep_tests {
     use super::*;
     use std::io::Write;
+    use std::time::Instant;
     use tempfile::TempDir;
+    use tokio::sync::mpsc::error::TryRecvError;
 
     fn make_worker(db: Arc<StreamsDatabase>) -> StreamWorker {
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_sweep_tx, sweep_rx) = tokio::sync::mpsc::unbounded_channel();
         let shutdown = Arc::new(Notify::new());
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let telemetry = DaemonTelemetryWorkerHandle::new_noop();
-        StreamWorker::new(db, telemetry, shutdown, shutdown_flag, rx)
+        StreamWorker::new(
+            db,
+            telemetry,
+            shutdown,
+            shutdown_flag,
+            checkpoint_rx,
+            sweep_rx,
+            SweepTriggerGate::new(),
+        )
+    }
+
+    #[test]
+    fn triggered_sweeps_share_thirty_second_cooldown() {
+        let (sweep_tx, mut sweep_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = StreamWorkerHandle::for_test_sweep_triggers(sweep_tx);
+        let started_at = Instant::now();
+
+        assert!(
+            handle
+                .sweep_trigger_gate
+                .try_mark_sweep_at(started_at, "periodic")
+        );
+
+        assert!(!handle.trigger_sweep_at(
+            SweepTrigger::PostCommit,
+            started_at + Duration::from_secs(29)
+        ));
+        assert_eq!(sweep_rx.try_recv(), Err(TryRecvError::Empty));
+
+        assert!(handle.trigger_sweep_at(
+            SweepTrigger::PostCommit,
+            started_at + Duration::from_secs(30)
+        ));
+        assert_eq!(sweep_rx.try_recv().unwrap(), SweepTrigger::PostCommit);
+
+        assert!(
+            !handle.trigger_sweep_at(SweepTrigger::PostPush, started_at + Duration::from_secs(59))
+        );
+        assert_eq!(sweep_rx.try_recv(), Err(TryRecvError::Empty));
+
+        assert!(
+            handle.trigger_sweep_at(SweepTrigger::PostPush, started_at + Duration::from_secs(60))
+        );
+        assert_eq!(sweep_rx.try_recv().unwrap(), SweepTrigger::PostPush);
     }
 
     #[test]

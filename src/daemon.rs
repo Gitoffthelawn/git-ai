@@ -1563,6 +1563,33 @@ fn apply_push_side_effect(
     Ok(())
 }
 
+fn transcript_sweep_triggers_for_events(
+    events: &[crate::daemon::domain::SemanticEvent],
+) -> Vec<crate::daemon::stream_worker::SweepTrigger> {
+    let mut triggers = Vec::new();
+
+    if events.iter().any(|event| {
+        matches!(
+            event,
+            crate::daemon::domain::SemanticEvent::CommitCreated { .. }
+                | crate::daemon::domain::SemanticEvent::CommitAmended { .. }
+        )
+    }) {
+        triggers.push(crate::daemon::stream_worker::SweepTrigger::PostCommit);
+    }
+
+    if events.iter().any(|event| {
+        matches!(
+            event,
+            crate::daemon::domain::SemanticEvent::PushCompleted { .. }
+        )
+    }) {
+        triggers.push(crate::daemon::stream_worker::SweepTrigger::PostPush);
+    }
+
+    triggers
+}
+
 fn apply_pull_notes_sync_side_effect(
     worktree: &str,
     command: Option<&str>,
@@ -4062,6 +4089,19 @@ impl ActorDaemonCoordinator {
         // Acquire pairs with the Release store in request_shutdown so all
         // writes made before shutdown is requested are visible to the caller.
         self.shutting_down.load(Ordering::Acquire)
+    }
+
+    fn trigger_transcript_sweep(&self, trigger: crate::daemon::stream_worker::SweepTrigger) {
+        let Some(worker) = &self.stream_worker else {
+            tracing::debug!(trigger = %trigger, "transcript sweep trigger skipped; worker is not running");
+            return;
+        };
+
+        if worker.trigger_sweep(trigger) {
+            tracing::info!(trigger = %trigger, "transcript sweep trigger enqueued");
+        } else {
+            tracing::debug!(trigger = %trigger, "transcript sweep trigger not enqueued");
+        }
     }
 
     fn request_shutdown(&self) {
@@ -7350,6 +7390,16 @@ impl ActorDaemonCoordinator {
             }
         }
 
+        for trigger in transcript_sweep_triggers_for_events(events) {
+            if trigger == crate::daemon::stream_worker::SweepTrigger::PostPush
+                && crate::git::cli_parser::is_dry_run(&parsed_invocation.command_args)
+            {
+                tracing::debug!("transcript sweep trigger skipped for dry-run push");
+                continue;
+            }
+            self.trigger_transcript_sweep(trigger);
+        }
+
         Ok(())
     }
 
@@ -9044,6 +9094,45 @@ mod tests {
         assert_eq!(
             checkpoint_control_response_timeout(&sample_checkpoint_request(), false),
             DAEMON_CONTROL_RESPONSE_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn transcript_sweep_triggers_for_commit_amend_and_push_events() {
+        use crate::daemon::domain::SemanticEvent;
+        use crate::daemon::stream_worker::SweepTrigger;
+
+        assert_eq!(
+            transcript_sweep_triggers_for_events(&[SemanticEvent::CommitCreated {
+                base: Some("base".to_string()),
+                new_head: "new".to_string(),
+            }]),
+            vec![SweepTrigger::PostCommit]
+        );
+        assert_eq!(
+            transcript_sweep_triggers_for_events(&[SemanticEvent::CommitAmended {
+                old_head: "old".to_string(),
+                new_head: "new".to_string(),
+            }]),
+            vec![SweepTrigger::PostCommit]
+        );
+        assert_eq!(
+            transcript_sweep_triggers_for_events(&[SemanticEvent::PushCompleted {
+                remote: Some("origin".to_string()),
+            }]),
+            vec![SweepTrigger::PostPush]
+        );
+        assert_eq!(
+            transcript_sweep_triggers_for_events(&[
+                SemanticEvent::CommitCreated {
+                    base: Some("base".to_string()),
+                    new_head: "new".to_string(),
+                },
+                SemanticEvent::PushCompleted {
+                    remote: Some("origin".to_string()),
+                },
+            ]),
+            vec![SweepTrigger::PostCommit, SweepTrigger::PostPush]
         );
     }
 

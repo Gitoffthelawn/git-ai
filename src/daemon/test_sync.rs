@@ -238,6 +238,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("create tempdir");
         let status = Command::new("git")
             .arg("init")
+            .env("GIT_TRACE2", "0")
+            .env("GIT_TRACE2_EVENT", "0")
             .current_dir(temp.path())
             .status()
             .expect("run git init");
@@ -248,6 +250,8 @@ mod tests {
     fn git_config(repo: &Path, key: &str, value: &str) {
         let status = Command::new("git")
             .args(["config", key, value])
+            .env("GIT_TRACE2", "0")
+            .env("GIT_TRACE2_EVENT", "0")
             .current_dir(repo)
             .status()
             .expect("run git config");
