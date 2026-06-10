@@ -257,10 +257,10 @@ fn find_visual_studio_windows() -> Vec<VsInstallation> {
             let version = entry.get("installationVersion")?.as_str()?.to_string();
             let instance_id = entry.get("instanceId")?.as_str()?.to_string();
 
-            // Only support VS 2022+ (17.x)
-            if !version.starts_with("17.") {
+            let dominated = version.starts_with("17.") || version.starts_with("18.");
+            if !dominated {
                 tracing::debug!(
-                    "Visual Studio: Skipping version {} (only 17.x supported)",
+                    "Visual Studio: Skipping version {} (only 17.x/18.x supported)",
                     version
                 );
                 return None;
@@ -292,7 +292,7 @@ fn is_extension_installed(inst: &VsInstallation) -> bool {
         let extensions_dir = std::path::PathBuf::from(&local_app_data)
             .join("Microsoft")
             .join("VisualStudio")
-            .join(format!("{}_{}", major_version, inst.instance_id))
+            .join(format!("{}.0_{}", major_version, inst.instance_id))
             .join("Extensions");
 
         if !extensions_dir.exists() {

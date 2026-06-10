@@ -184,11 +184,13 @@ The core detection logic, directly modeled after IntelliJ's `StackTraceAnalyzer.
 
 | Agent name | Namespace prefixes (HIGH confidence) | Class keywords (MEDIUM confidence) |
 |---|---|---|
-| `github-copilot-visualstudio` | `GitHub.Copilot`, `Microsoft.VisualStudio.Copilot`, `Microsoft.VisualStudio.Editor.Implementation.Copilot`, `Microsoft.VisualStudio.Conversations.UI.Internal.Copilot` | `copilot` |
+| `github-copilot-visualstudio` | `GitHub.Copilot`, `Microsoft.VisualStudio.Copilot`, `Microsoft.VisualStudio.Conversations.UI.Internal.Copilot` | `copilot` |
 
 **Specific stack frames observed**:
-- Inline completions: `Microsoft.VisualStudio.Editor.Implementation.CopilotPreemptingCommandFilter.Exec`
 - Chat edits: `Microsoft.VisualStudio.Conversations.UI.Internal.CopilotBufferUpdater.ApplyEditsAndSaveAsync`
+
+**Not detectable via stack trace**:
+- Inline completions (Tab accept): Goes through `Microsoft.VisualStudio.Editor.Implementation.SuggestionService.AcceptSuggestionCommandHandler`, which is generic VS infrastructure for all inline suggestion providers, not Copilot-specific. `CopilotPreemptingCommandFilter.Exec` is also present but fires for ALL keystrokes (human and AI) so cannot be used.
 
 **Confidence levels**:
 

@@ -182,7 +182,7 @@ namespace GitAiVS.Services
 
         internal static Version? ParseVersion(string versionString)
         {
-            var part = versionString.Split(' ')[0];
+            var part = versionString.Trim().Split(' ')[0];
             var segments = part.Split('.');
             if (segments.Length < 3) return null;
 

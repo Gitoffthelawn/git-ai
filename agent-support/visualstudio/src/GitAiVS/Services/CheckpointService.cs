@@ -122,6 +122,9 @@ namespace GitAiVS.Services
                 await proc.StandardInput.WriteAsync(stdinJson);
                 proc.StandardInput.Close();
 
+                var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+                var stderrTask = proc.StandardError.ReadToEndAsync();
+
                 var completed = proc.WaitForExit(CheckpointTimeoutMs);
                 if (!completed)
                 {
@@ -130,8 +133,8 @@ namespace GitAiVS.Services
                     return false;
                 }
 
-                var stdout = proc.StandardOutput.ReadToEnd().Trim();
-                var stderr = proc.StandardError.ReadToEnd().Trim();
+                var stdout = (await stdoutTask).Trim();
+                var stderr = (await stderrTask).Trim();
 
                 if (proc.ExitCode != 0)
                 {
