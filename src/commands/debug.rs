@@ -2,6 +2,9 @@ use crate::auth::{AuthState, collect_auth_status, format_unix_timestamp};
 use crate::config;
 use crate::diagnostics::{DiagnosticCheckResult, GitDiagnosticTarget};
 use crate::git::find_repository_in_path;
+use crate::git::repository::{
+    GitAuthorIdentity, GitIdentityResolution, global_git_config_committer_identity,
+};
 use crate::process_timeout::{TimedCommandOutput, run_command_with_timeout};
 use std::env;
 use std::fmt::Write as _;
@@ -105,6 +108,7 @@ fn build_debug_report(options: DebugOptions) -> String {
     let platform_info = collect_platform_info();
     let hardware_info = collect_hardware_info();
     let repository_info = collect_repository_info();
+    let git_committer_identity = collect_git_committer_identity_info();
     let auth_info = collect_auth_status();
     let git_environment = collect_git_environment();
     debug_progress("debug report ready");
@@ -275,6 +279,9 @@ fn build_debug_report(options: DebugOptions) -> String {
     }
     let _ = writeln!(out);
 
+    append_git_committer_identity(&mut out, &git_committer_identity);
+    let _ = writeln!(out);
+
     append_git_diagnostics(&mut out, &daemon_diagnostics, &git_diagnostics);
     let _ = writeln!(out);
 
@@ -395,6 +402,70 @@ struct GitDebugDiagnostics {
     trace2_config: DiagnosticCheckResult,
     attribution: DiagnosticCheckResult,
     trace2: DiagnosticCheckResult,
+}
+
+struct GitCommitterIdentityInfo {
+    global_config: Result<GitAuthorIdentity, String>,
+    repository: RepositoryCommitterIdentity,
+}
+
+enum RepositoryCommitterIdentity {
+    InRepository(GitIdentityResolution),
+    NotInRepository(String),
+}
+
+fn collect_git_committer_identity_info() -> GitCommitterIdentityInfo {
+    let global_config = global_git_config_committer_identity().map_err(|e| e.to_string());
+    let repository = env::current_dir()
+        .map_err(|e| e.to_string())
+        .and_then(|cwd| find_repository_in_path(&cwd.to_string_lossy()).map_err(|e| e.to_string()))
+        .map(|repo| {
+            RepositoryCommitterIdentity::InRepository(repo.git_author_identity_resolution())
+        })
+        .unwrap_or_else(RepositoryCommitterIdentity::NotInRepository);
+
+    GitCommitterIdentityInfo {
+        global_config,
+        repository,
+    }
+}
+
+fn append_git_committer_identity(out: &mut String, identity: &GitCommitterIdentityInfo) {
+    let _ = writeln!(out, "== Git Committer Identity ==");
+    let _ = writeln!(out, "Global git config identity:");
+    match &identity.global_config {
+        Ok(global) => append_git_author_identity(out, global, "  "),
+        Err(err) => {
+            let _ = writeln!(out, "  <error: {}>", err);
+        }
+    }
+
+    let _ = writeln!(out, "Repository effective committer identity:");
+    match &identity.repository {
+        RepositoryCommitterIdentity::InRepository(resolution) => {
+            let raw = resolution
+                .raw_git_var
+                .as_deref()
+                .unwrap_or("<unavailable; git-ai used config fallback>");
+            let _ = writeln!(out, "  Raw GIT_COMMITTER_IDENT: {}", raw);
+            append_git_author_identity(out, &resolution.identity, "  ");
+        }
+        RepositoryCommitterIdentity::NotInRepository(err) => {
+            let _ = writeln!(out, "  <not in repository: {}>", err);
+        }
+    }
+}
+
+fn append_git_author_identity(out: &mut String, identity: &GitAuthorIdentity, prefix: &str) {
+    let formatted = identity
+        .formatted()
+        .unwrap_or_else(|| "<unavailable>".to_string());
+    let name = identity.name.as_deref().unwrap_or("<unavailable>");
+    let email = identity.email.as_deref().unwrap_or("<unavailable>");
+
+    let _ = writeln!(out, "{}Formatted: {}", prefix, formatted);
+    let _ = writeln!(out, "{}Parsed name: {}", prefix, name);
+    let _ = writeln!(out, "{}Parsed email: {}", prefix, email);
 }
 
 fn collect_git_diagnostics(
