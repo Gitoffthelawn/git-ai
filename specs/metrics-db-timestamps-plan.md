@@ -50,6 +50,8 @@ The metadata columns are:
   - `event_kind INTEGER DEFAULT NULL`
   - requested identifier columns as nullable `TEXT`
   - `metrics_event_ts_kind` index on `(event_ts, event_kind, id)` for rows where both metadata columns are non-null.
+  - `metrics_session_kind_ts` index on `(session_id, event_kind, event_ts, id)` for rows where session, kind, and timestamp metadata are non-null.
+  - `metrics_parent_session_kind_ts` index on `(parent_session_id, event_kind, event_ts, id)` for rows where parent session, kind, and timestamp metadata are non-null.
 - Use a dedicated helper `add_event_metadata_columns()` from `apply_migration(3)` so partially applied/concurrent states are handled the same way as the retry-column migration.
 
 ### Metadata Sources
@@ -175,7 +177,7 @@ New inserts continue to accept bad JSON because upload/error handling already ac
 
 ### Pass 4: Performance
 
-The new columns should let common history/retention paths avoid JSON parsing for backfilled/new rows, while preserving fallback correctness for old rows. Backfill should operate in bounded batches.
+The new columns should let common history/retention paths avoid JSON parsing for backfilled/new rows, while preserving fallback correctness for old rows. Backfill should operate in bounded batches. Session-scoped indexes should put equality predicates first (`session_id` or `parent_session_id`, then `event_kind`) and timestamp after them so filtered metric queries can use the same index for timestamp ranges and stable row ordering.
 
 ### Pass 5: Verification
 

@@ -52,6 +52,18 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS metrics_event_ts_kind
         ON metrics (event_ts, event_kind, id)
         WHERE event_ts IS NOT NULL AND event_kind IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS metrics_session_kind_ts
+        ON metrics (session_id, event_kind, event_ts, id)
+        WHERE session_id IS NOT NULL
+            AND event_kind IS NOT NULL
+            AND event_ts IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS metrics_parent_session_kind_ts
+        ON metrics (parent_session_id, event_kind, event_ts, id)
+        WHERE parent_session_id IS NOT NULL
+            AND event_kind IS NOT NULL
+            AND event_ts IS NOT NULL;
     "#,
 ];
 
@@ -1226,6 +1238,18 @@ mod tests {
         rows.collect::<Result<Vec<_>, _>>().unwrap()
     }
 
+    fn assert_metric_index_exists(db: &MetricsDatabase, index: &str) {
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                params![index],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "missing index {index}");
+    }
+
     fn metric_metadata_rows(db: &MetricsDatabase) -> Vec<(Option<i64>, Option<i64>)> {
         let mut stmt = db
             .conn
@@ -1350,6 +1374,14 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(column_count, 1, "missing column {column}");
+        }
+
+        for index in [
+            "metrics_event_ts_kind",
+            "metrics_session_kind_ts",
+            "metrics_parent_session_kind_ts",
+        ] {
+            assert_metric_index_exists(&db, index);
         }
     }
 
@@ -1546,6 +1578,13 @@ mod tests {
         assert_eq!(version, "4");
         assert!(db.column_exists("metrics", "event_ts").unwrap());
         assert!(db.column_exists("metrics", "event_kind").unwrap());
+        for index in [
+            "metrics_event_ts_kind",
+            "metrics_session_kind_ts",
+            "metrics_parent_session_kind_ts",
+        ] {
+            assert_metric_index_exists(&db, index);
+        }
         assert_eq!(metric_metadata_rows(&db), vec![(None, None)]);
         assert_eq!(
             metric_identifier_rows(&db),
