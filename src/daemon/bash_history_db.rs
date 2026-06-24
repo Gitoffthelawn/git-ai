@@ -107,6 +107,7 @@ impl BashHistoryDatabase {
                 || std::env::var_os("GITAI_TEST_DB_PATH").is_some())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn disabled_database() -> Self {
         let conn = Connection::open_in_memory().expect("Failed to create disabled bash DB");
         BashHistoryDatabase {
