@@ -139,6 +139,16 @@ impl TelemetryBuffer {
 
     fn ingest_daemon_logs(&mut self, events: Vec<DaemonLogEvent>) {
         self.daemon_logs.extend(events);
+        self.cap_daemon_logs();
+    }
+
+    fn requeue_failed_daemon_logs(&mut self, mut failed_events: Vec<DaemonLogEvent>) {
+        failed_events.append(&mut self.daemon_logs);
+        self.daemon_logs = failed_events;
+        self.cap_daemon_logs();
+    }
+
+    fn cap_daemon_logs(&mut self) {
         let overflow = self
             .daemon_logs
             .len()
@@ -473,7 +483,10 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, daemon_id: St
         });
 
         if !failed_daemon_logs.is_empty() {
-            buffer.lock().await.ingest_daemon_logs(failed_daemon_logs);
+            buffer
+                .lock()
+                .await
+                .requeue_failed_daemon_logs(failed_daemon_logs);
         }
     }
 }
@@ -1829,6 +1842,32 @@ mod tests {
         assert_eq!(
             buffer.daemon_logs.last().unwrap().message,
             (total - 1).to_string()
+        );
+    }
+
+    #[test]
+    fn telemetry_buffer_requeues_failed_daemon_logs_without_dropping_newer_events() {
+        let mut buffer = TelemetryBuffer::new();
+        buffer.ingest_daemon_logs(vec![
+            sample_daemon_log_event("new-1"),
+            sample_daemon_log_event("new-2"),
+        ]);
+
+        let failed_events = (0..MAX_DAEMON_LOG_BUFFER_EVENTS)
+            .map(|index| sample_daemon_log_event(format!("old-{index}")))
+            .collect();
+
+        buffer.requeue_failed_daemon_logs(failed_events);
+
+        assert_eq!(buffer.daemon_logs.len(), MAX_DAEMON_LOG_BUFFER_EVENTS);
+        assert_eq!(buffer.daemon_logs.first().unwrap().message, "old-2");
+        assert_eq!(
+            buffer.daemon_logs[MAX_DAEMON_LOG_BUFFER_EVENTS - 2].message,
+            "new-1"
+        );
+        assert_eq!(
+            buffer.daemon_logs[MAX_DAEMON_LOG_BUFFER_EVENTS - 1].message,
+            "new-2"
         );
     }
 
