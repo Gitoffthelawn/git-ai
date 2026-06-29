@@ -12,6 +12,7 @@ const MAX_MESSAGE_LENGTH: usize = 16_000;
 const MAX_TARGET_LENGTH: usize = 512;
 const MAX_FIELD_KEY_LENGTH: usize = 256;
 const MAX_FIELD_VALUE_LENGTH: usize = 4096;
+const MAX_FIELDS_PER_EVENT: usize = 64;
 
 /// Captures tracing events for best-effort daemon diagnostics upload.
 pub struct DaemonLogUploadLayer;
@@ -44,6 +45,9 @@ impl DaemonLogVisitor {
 
     fn record_named_field_value(&mut self, name: &str, value: DaemonLogFieldValue) {
         let key = truncate_string(name, MAX_FIELD_KEY_LENGTH);
+        if !self.fields.contains_key(&key) && self.fields.len() >= MAX_FIELDS_PER_EVENT {
+            return;
+        }
         let value = sanitize_field_value(value);
         self.fields.insert(key, value);
     }
@@ -174,5 +178,22 @@ mod tests {
             visitor.fields.get("ok"),
             Some(&DaemonLogFieldValue::from(true))
         );
+    }
+
+    #[test]
+    fn visitor_caps_field_count() {
+        let mut visitor = DaemonLogVisitor::new();
+
+        for index in 0..=MAX_FIELDS_PER_EVENT {
+            visitor.record_named_field_value(
+                &format!("field-{index}"),
+                DaemonLogFieldValue::from(index as u64),
+            );
+        }
+
+        assert_eq!(visitor.fields.len(), MAX_FIELDS_PER_EVENT);
+        assert!(visitor.fields.contains_key("field-0"));
+        assert!(visitor.fields.contains_key("field-63"));
+        assert!(!visitor.fields.contains_key("field-64"));
     }
 }

@@ -15,6 +15,8 @@ This document describes the Git AI client-side daemon diagnostics upload path.
   auth/configuration does not permit upload.
 - `feature_flags.daemon_log_upload` disables capture and upload when set to
   `false`. The flag defaults to enabled in debug and release builds.
+- Each event keeps at most 64 structured fields. Field names and string values
+  are length-limited before buffering.
 
 ## Endpoint
 
