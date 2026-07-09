@@ -312,7 +312,6 @@ fn normalize_tool_name(tool_name: &str) -> &str {
 
 /// Classify a tool name for a given agent.
 pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
-    let tool_name = normalize_tool_name(tool_name);
     match agent {
         Agent::Claude => match tool_name {
             "Write" | "Edit" | "MultiEdit" => ToolClass::FileEdit,
@@ -349,12 +348,17 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "Bash" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
-        Agent::Codex => match tool_name {
-            "apply_patch" => ToolClass::FileEdit,
-            "Bash" | "exec_command" | "shell" | "shell_command" => ToolClass::Bash,
-            "multi_tool_use.parallel" => ToolClass::Bash,
-            _ => ToolClass::Skip,
-        },
+        Agent::Codex => {
+            // Codex Desktop (OpenAI function-calling) prefixes tool names with
+            // "functions."; strip it before matching the bare tool name.
+            let tool_name = normalize_tool_name(tool_name);
+            match tool_name {
+                "apply_patch" => ToolClass::FileEdit,
+                "Bash" | "exec_command" | "shell" | "shell_command" => ToolClass::Bash,
+                "multi_tool_use.parallel" => ToolClass::Bash,
+                _ => ToolClass::Skip,
+            }
+        }
         Agent::Pi => match tool_name {
             "edit" | "write" | "replace" | "rename" => ToolClass::FileEdit,
             "bash" => ToolClass::Bash,
