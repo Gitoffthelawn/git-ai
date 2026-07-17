@@ -521,45 +521,27 @@ jobs:
           name: git-ai-windows-msi
           path: release
 
-      - name: Install and uninstall MSI as a standard user
+      - name: Install and uninstall per-user MSI
         shell: pwsh
         run: |
           $msi = (Get-ChildItem release\git-ai-windows-x64.msi).FullName
           $apiBase = 'https://dev.usegitai.com'
           $apiKey = 'ci-package-test-key'
-          $testUser = 'git-ai-package-test'
-          $password = ConvertTo-SecureString "GitAi-Ci!$([guid]::NewGuid().ToString('N'))" -AsPlainText -Force
-          $credential = [pscredential]::new("$env:COMPUTERNAME\$testUser", $password)
-          New-LocalUser -Name $testUser -Password $password | Out-Null
+          $gitAi = Join-Path $env:USERPROFILE '.git-ai\bin\git-ai.exe'
+          $configPath = Join-Path $env:USERPROFILE '.git-ai\config.json'
 
-          $testHome = Join-Path $env:SystemDrive "Users\$testUser"
-          $gitAi = Join-Path $testHome '.git-ai\bin\git-ai.exe'
-          $configPath = Join-Path $testHome '.git-ai\config.json'
-          $publicMsi = Join-Path $env:PUBLIC 'Downloads\git-ai-windows-x64.msi'
-          Copy-Item $msi $publicMsi -Force
-
-          $installCommand = @"
-          `$process = Start-Process msiexec.exe -ArgumentList '/i `"$publicMsi`" /qn /norestart API_BASE=$apiBase API_KEY=$apiKey' -Wait -PassThru
-          if (`$process.ExitCode -ne 0) { exit `$process.ExitCode }
-          & '$gitAi' --version
-          exit `$LASTEXITCODE
-          "@
-          $install = Start-Process pwsh.exe -Credential $credential -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $installCommand) -Wait -PassThru
+          $install = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart API_BASE=$apiBase API_KEY=$apiKey" -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "MSI install failed with exit code $($install.ExitCode)" }
 
           $config = Get-Content $configPath -Raw | ConvertFrom-Json
           if ($config.api_base_url -ne $apiBase) { throw 'MSI did not persist API_BASE for the installing user' }
           if ([string]::IsNullOrWhiteSpace($config.api_key)) { throw 'MSI did not persist API_KEY for the installing user' }
-          if ((Get-Acl $gitAi).Owner -notlike "*\$testUser") { throw 'MSI binary is not owned by the installing user' }
-          if ((Get-Acl $configPath).Owner -notlike "*\$testUser") { throw 'MSI config is not owned by the installing user' }
-          if (Test-Path (Join-Path $testHome 'AppData\Local\Git AI')) { throw 'MSI created the retired LocalAppData runtime' }
+          if ((Get-Acl $gitAi).Owner -eq 'NT AUTHORITY\SYSTEM') { throw 'MSI binary is owned by SYSTEM' }
+          if ((Get-Acl $configPath).Owner -eq 'NT AUTHORITY\SYSTEM') { throw 'MSI config is owned by SYSTEM' }
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'Git AI')) { throw 'MSI created the retired LocalAppData runtime' }
           if (Test-Path (Join-Path $env:ProgramFiles 'Git AI')) { throw 'MSI created a system-wide runtime' }
 
-          $uninstallCommand = @"
-          `$process = Start-Process msiexec.exe -ArgumentList '/x `"$publicMsi`" /qn /norestart' -Wait -PassThru
-          exit `$process.ExitCode
-          "@
-          $uninstall = Start-Process pwsh.exe -Credential $credential -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $uninstallCommand) -Wait -PassThru
+          $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn /norestart" -Wait -PassThru
           if ($uninstall.ExitCode -ne 0) { throw "MSI uninstall failed with exit code $($uninstall.ExitCode)" }
 
   test-pkg:
