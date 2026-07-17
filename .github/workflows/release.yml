@@ -595,7 +595,6 @@ jobs:
             echo '::error::PKG created a system-wide binary'
             exit 1
           fi
-          pkgutil --pkg-info com.git-ai.git-ai
 
   create-release:
     name: Create Release
