@@ -31,7 +31,7 @@ dotnet tool update --global wix --version $wixVersion | Out-Host
 $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
 $wix = Get-Command wix -ErrorAction Stop
 
-& $wix.Source extension add --global $wixUtilExtension | Out-Host
+& $wix.Source extension add --global $wixUtilExtension -acceptEula wix7 | Out-Host
 if ($LASTEXITCODE -ne 0) {
     throw "WiX extension install failed with exit code $LASTEXITCODE"
 }
