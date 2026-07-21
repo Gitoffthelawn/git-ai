@@ -655,7 +655,7 @@ jobs:
 
       - name: Move artifacts to release directory
         run: |
-          find artifacts -type f \( -name "git-ai-*" -o -name "git-ai_*" \) -exec cp {} release/ \;
+          find artifacts -type f -name "git-ai-*" -exec cp {} release/ \;
 
       - name: List available artifacts
         run: |
@@ -666,7 +666,7 @@ jobs:
         run: |
           cd release
           shopt -s nullglob
-          artifacts=(git-ai-* git-ai_*)
+          artifacts=(git-ai-*)
           if [ ${#artifacts[@]} -gt 0 ]; then
             sha256sum "${artifacts[@]}" | sort > SHA256SUMS
           else
@@ -727,7 +727,6 @@ jobs:
         with:
           subject-path: |
             release/git-ai-*
-            release/git-ai_*
             release/install.sh
             release/install.ps1
             release/SHA256SUMS
@@ -789,7 +788,6 @@ jobs:
             ```
           files: |
             release/git-ai-*
-            release/git-ai_*
             release/SHA256SUMS
             release/install.sh
             release/install.ps1
