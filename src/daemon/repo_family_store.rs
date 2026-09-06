@@ -153,13 +153,18 @@ impl RepoFamilyStore {
         Ok(())
     }
 
-    /// Every remembered family, most recently seen first.
-    pub fn known_families(&self) -> Result<Vec<String>, GitAiError> {
+    /// Every remembered family, most recently seen first; without
+    /// `include_missing`, families whose common dir was last seen missing are
+    /// left out (a routine tick does not re-probe them).
+    pub fn known_families(&self, include_missing: bool) -> Result<Vec<String>, GitAiError> {
         let conn = self.lock();
-        let mut statement =
-            conn.prepare("SELECT common_dir FROM repo_families ORDER BY last_seen_at DESC")?;
+        let mut statement = conn.prepare(
+            "SELECT common_dir FROM repo_families
+             WHERE ?1 OR missing_since IS NULL
+             ORDER BY last_seen_at DESC",
+        )?;
         let families = statement
-            .query_map([], |row| row.get::<_, String>(0))?
+            .query_map(params![include_missing], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(families)
     }
@@ -398,7 +403,7 @@ mod tests {
             .unwrap();
         assert_eq!(version, MIGRATIONS.len() as u32);
         assert_eq!(
-            store.known_families().unwrap(),
+            store.known_families(true).unwrap(),
             vec!["/repos/old/.git".to_string()]
         );
         assert_eq!(
@@ -488,7 +493,7 @@ mod tests {
             (NOW as i64, (NOW + 20) as i64, None)
         );
         assert_eq!(
-            store.known_families().unwrap(),
+            store.known_families(true).unwrap(),
             vec!["/repos/a/.git".to_string(), "/repos/b/.git".to_string()],
             "most recently seen first"
         );
@@ -514,6 +519,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(missing, (NOW + 10) as i64);
+        assert_eq!(
+            store.known_families(false).unwrap(),
+            Vec::<String>::new(),
+            "a missing family is not re-probed by routine ticks"
+        );
+        assert_eq!(
+            store.known_families(true).unwrap(),
+            vec!["/repos/a/.git".to_string()]
+        );
     }
 
     #[test]
@@ -556,7 +570,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store.known_families().unwrap(),
+            store.known_families(false).unwrap(),
             vec!["/repos/a/.git".to_string()]
         );
         assert_eq!(store.cursor("/repos/a/.git").unwrap(), Some(cursor));
@@ -603,7 +617,7 @@ mod tests {
 
         assert_eq!(removed, 2);
         assert_eq!(
-            store.known_families().unwrap(),
+            store.known_families(true).unwrap(),
             vec![
                 "/repos/fresh/.git".to_string(),
                 "/repos/recently-missing/.git".to_string()
@@ -625,7 +639,7 @@ mod tests {
 
         assert_eq!(removed, 5);
         assert_eq!(store.family_count().unwrap(), MAX_FAMILIES);
-        let families = store.known_families().unwrap();
+        let families = store.known_families(true).unwrap();
         assert!(!families.contains(&"/repos/0/.git".to_string()));
         assert!(!families.contains(&"/repos/4/.git".to_string()));
         assert!(families.contains(&"/repos/5/.git".to_string()));
