@@ -25,6 +25,7 @@ fn setup() {
         rewrite_metrics_events: false,
         token_usage_metrics: false,
         untraced_commit_fixup: false,
+        untraced_fixup_ignore_temp_repos: false,
     };
 
     git_ai::config::Config::set_test_feature_flags(test_flags.clone());

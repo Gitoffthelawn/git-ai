@@ -233,6 +233,9 @@ impl DaemonProcess {
                     std::env::var("GIT_AI_TEST_UNTRACED_FIXUP_INTERVAL_MS")
                         .unwrap_or_else(|_| "3600000".to_string()),
                 )
+                // Every TestRepo lives under the OS temp dir, which the fixup
+                // ignores by default; tests that cover that rule opt back in.
+                .env("GIT_AI_UNTRACED_FIXUP_IGNORE_TEMP_REPOS", "false")
                 .stdout(Stdio::null())
                 .stderr(
                     stderr_log

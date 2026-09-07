@@ -297,6 +297,29 @@ impl RepoFamilyStore {
         Ok(worktrees)
     }
 
+    /// Forgets the given families and their cursors, in one transaction; used
+    /// to drop repositories the fixup has since been told to ignore.
+    pub fn forget_families(&self, common_dirs: &[String]) -> Result<usize, GitAiError> {
+        if common_dirs.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.lock();
+        let tx = conn.unchecked_transaction()?;
+        let mut removed = 0;
+        for common_dir in common_dirs {
+            removed += tx.execute(
+                "DELETE FROM repo_families WHERE common_dir = ?1",
+                params![common_dir],
+            )?;
+            tx.execute(
+                "DELETE FROM worktree_fixup_cursors WHERE common_dir = ?1",
+                params![common_dir],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
     /// Forgets families missing or unseen for too long, then the least
     /// recently seen beyond `MAX_FAMILIES`, with their cursors. Returns how
     /// many families were removed.
@@ -584,6 +607,32 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn forget_families_removes_them_and_their_cursors_only() {
+        let (_temp, store) = store();
+        for (family, git_dir, worktree) in [
+            ("/tmp/scratch/.git", "/tmp/scratch/.git", "/tmp/scratch"),
+            ("/home/me/real/.git", "/home/me/real/.git", "/home/me/real"),
+        ] {
+            store
+                .record_pass_completed(family, git_dir, worktree, &cursor_with_anchor(64), NOW)
+                .unwrap();
+        }
+
+        let removed = store
+            .forget_families(&["/tmp/scratch/.git".to_string(), "/nope/.git".to_string()])
+            .unwrap();
+
+        assert_eq!(removed, 1);
+        assert_eq!(
+            store.known_families(true).unwrap(),
+            vec!["/home/me/real/.git".to_string()]
+        );
+        assert_eq!(store.cursor("/tmp/scratch/.git").unwrap(), None);
+        assert!(store.cursor("/home/me/real/.git").unwrap().is_some());
+        assert_eq!(store.forget_families(&[]).unwrap(), 0);
     }
 
     #[test]

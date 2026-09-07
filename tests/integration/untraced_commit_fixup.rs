@@ -10,6 +10,7 @@ use crate::test_utils::{
     isolated_metrics_db_path,
 };
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+use git_ai::daemon::repo_family_store::RepoFamilyStore;
 use git_ai::metrics::events::committed_pos;
 use serde_json::Value;
 use std::fs;
@@ -667,4 +668,145 @@ fn feature_flag_disables_the_periodic_scan_but_not_explicit_requests() {
         "base".unattributed_human(),
         "untraced".unattributed_human()
     ]);
+}
+
+/// A scratch repository next to `repo` with one raw commit: the kind of
+/// repository an agent creates for its own work.
+fn scratch_sibling(repo: &TestRepo, suffix: &str) -> PathBuf {
+    let path = sibling_repo(repo, suffix);
+    fs::write(path.join("scratch.txt"), "scratch\n").unwrap();
+    raw_commit_all_in(&path, "scratch");
+    path
+}
+
+fn store_families(repo: &TestRepo) -> Vec<String> {
+    RepoFamilyStore::open(
+        &repo
+            .daemon_home_path()
+            .join(".git-ai")
+            .join("internal")
+            .join("repo-families-db"),
+    )
+    .expect("test daemon's repo-families store opens")
+    .known_families(true)
+    .expect("families load")
+}
+
+#[test]
+fn temp_repositories_are_ignored_by_the_fixup_but_not_by_the_traced_path() {
+    // The test repo itself lives under the OS temp dir: with the rule on it is
+    // exactly the kind of repository the fixup must leave alone.
+    let (_metrics_dir, metrics_db_path) = isolated_metrics_db_path();
+    let mut env = fixup_daemon_env(&metrics_db_path);
+    env.push(("GIT_AI_UNTRACED_FIXUP_IGNORE_TEMP_REPOS", "true"));
+    let repo = TestRepo::new_with_daemon_env(&env);
+    write_file(&repo, "agent.txt", "base\n");
+    repo.stage_all_and_commit("traced base")
+        .expect("traced base commit");
+    codex_edit(&repo, "agent.txt", "base\nai line\n", "tool-use-1");
+    let traced = repo
+        .stage_all_and_commit("traced agent commit")
+        .expect("traced agent commit")
+        .commit_sha;
+    // Traced work is untouched by the rule.
+    let mut file = repo.filename("agent.txt");
+    file.assert_committed_lines(lines!["base".unattributed_human(), "ai line".ai()]);
+    assert_eq!(commit_source(&metrics_db_path, &traced), None);
+
+    write_file(&repo, "agent.txt", "base\nai line\nuntraced\n");
+    let untraced = raw_commit_all(&repo, "untraced in a temp repo");
+    let scheduled = repo.request_untraced_fixup_scan();
+
+    assert_eq!(scheduled.get("ignored").and_then(Value::as_u64), Some(1));
+    assert_eq!(scheduled.get("worktrees").and_then(Value::as_u64), Some(0));
+    assert!(repo.read_authorship_note(&untraced).is_none());
+    assert_eq!(health_counter(&repo, "untraced_commits_fixed"), 0);
+    assert!(store_families(&repo).is_empty(), "nothing is remembered");
+}
+
+#[test]
+fn configured_globs_ignore_a_scratch_sibling_while_the_repo_is_still_fixed_up() {
+    let (_metrics_dir, metrics_db_path) = isolated_metrics_db_path();
+    let patch = serde_json::json!({
+        "untraced_fixup_ignored_paths": ["*-agent-scratch/.git"]
+    })
+    .to_string();
+    let mut env = fixup_daemon_env(&metrics_db_path);
+    env.push(("GIT_AI_TEST_CONFIG_PATCH", patch.as_str()));
+    let repo = TestRepo::new_with_daemon_env(&env);
+    write_file(&repo, "plain.txt", "base\n");
+    repo.stage_all_and_commit("traced base")
+        .expect("traced base commit");
+    repo.request_untraced_fixup_scan();
+    let scratch = scratch_sibling(&repo, "agent-scratch");
+
+    let scratch_scan = repo.request_untraced_fixup_scan_for(&scratch);
+    assert_eq!(scratch_scan.get("ignored").and_then(Value::as_u64), Some(1));
+
+    write_file(&repo, "plain.txt", "base\nuntraced\n");
+    let untraced = raw_commit_all(&repo, "untraced in the real repo");
+    repo.request_untraced_fixup_scan();
+    assert!(repo.read_authorship_note(&untraced).is_some());
+    let mut file = repo.filename("plain.txt");
+    file.assert_committed_lines(lines![
+        "base".unattributed_human(),
+        "untraced".unattributed_human()
+    ]);
+    let families = store_families(&repo);
+    assert_eq!(families.len(), 1, "{families:?}");
+    assert!(!families[0].contains("agent-scratch"));
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+#[test]
+fn remembered_temp_repositories_are_purged_once_the_rule_is_on() {
+    let (_metrics_dir, metrics_db_path, mut repo) = fixup_repo();
+    write_file(&repo, "plain.txt", "base\n");
+    repo.stage_all_and_commit("traced base")
+        .expect("traced base commit");
+    // Rule off (the harness default): the repo is remembered like any other.
+    repo.request_untraced_fixup_scan();
+    assert_eq!(store_families(&repo).len(), 1);
+
+    repo.shutdown_dedicated_daemon_for_test();
+    let mut env = fixup_daemon_env(&metrics_db_path);
+    env.push(("GIT_AI_UNTRACED_FIXUP_IGNORE_TEMP_REPOS", "true"));
+    repo.start_dedicated_daemon_with_env_for_test(&env);
+
+    // The first tick is a maintenance round and forgets the row; an explicit
+    // scan afterwards schedules nothing for it.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && !store_families(&repo).is_empty() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        store_families(&repo).is_empty(),
+        "{:?}",
+        store_families(&repo)
+    );
+    let scheduled = repo.request_untraced_fixup_scan_all();
+    assert_eq!(scheduled.get("worktrees").and_then(Value::as_u64), Some(0));
+    assert_eq!(health_counter(&repo, "known_repo_families"), 0);
+}
+
+#[test]
+fn the_periodic_scan_never_touches_an_ignored_temp_repository() {
+    let (_metrics_dir, metrics_db_path) = isolated_metrics_db_path();
+    let mut env = fixup_daemon_env(&metrics_db_path);
+    env.push(("GIT_AI_DAEMON_UNTRACED_FIXUP_INTERVAL_MS", "200"));
+    env.push(("GIT_AI_UNTRACED_FIXUP_IGNORE_TEMP_REPOS", "true"));
+    let repo = TestRepo::new_with_daemon_env(&env);
+    write_file(&repo, "plain.txt", "base\n");
+    repo.stage_all_and_commit("traced base")
+        .expect("traced base commit");
+    write_file(&repo, "plain.txt", "base\nuntraced\n");
+    let untraced = raw_commit_all(&repo, "untraced in a temp repo");
+
+    assert!(
+        !wait_for_note(&repo, &untraced, Duration::from_secs(3)),
+        "the timer must not fix up a temp repository"
+    );
+    assert_eq!(health_counter(&repo, "untraced_commits_fixed"), 0);
+    assert_eq!(health_counter(&repo, "known_repo_families"), 0);
+    assert!(store_families(&repo).is_empty());
 }

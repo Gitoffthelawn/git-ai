@@ -111,6 +111,28 @@ untraced history, which is exactly what the fixup exists to claim.
   `untraced_cursor_reseeds`, `untraced_scan_errors`, `known_repo_families` in
   `status.daemon`, `git-ai bg status`, and the heartbeat.
 
+## Repositories the fixup ignores
+
+AI agents create scratch repositories under the OS temp directory for their own
+work. The fixup leaves those alone: it never remembers, scans, persists or
+backfills a family whose canonical common dir is under a temp root
+(`$TMPDIR`/`TEMP`/`TMP`, `/tmp`, `/var/tmp`, macOS `/var/folders`, Windows
+`%TEMP%`) or matches an `untraced_fixup_ignored_paths` glob from the config.
+Rows for such families are forgotten on the next maintenance round.
+
+This is scoped to the fixup and its store (`src/daemon/untraced_fixup_ignore.rs`,
+consulted only by the fixup scheduler). It is not a global repository exclusion:
+traced commands and checkpoints in a temp repository keep their normal
+behaviour. The temp-root part is gated by the `untraced_fixup_ignore_temp_repos`
+feature flag (on by default; the test harness turns it off because every test
+repository lives under the temp dir); configured globs always apply.
+
+The check is a component-wise prefix comparison per root and a glob match per
+pattern on strings computed once at startup, placed at the top of the per-family
+loop a tick already runs, before the stat and any store write. An ignored
+family therefore costs less than it did, and a non-ignored one costs a handful
+of byte comparisons more.
+
 ## Known limitations
 
 - Detached-HEAD commits are never fixed up.

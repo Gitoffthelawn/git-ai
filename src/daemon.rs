@@ -84,6 +84,7 @@ pub mod token_usage_worker;
 pub mod trace_normalizer;
 pub mod transcript_redaction;
 pub mod untraced_commit_fixup;
+pub mod untraced_fixup_ignore;
 
 pub use control_api::{
     BashSessionQueryResponse, BashSnapshotQueryResponse, ControlRequest, ControlResponse,
@@ -2755,6 +2756,9 @@ pub(crate) struct UntracedScanSchedule {
     /// Changed worktrees left for the next tick: by the per-tick cap, or
     /// because a git command of their family was still running.
     deferred: usize,
+    /// Families the fixup ignores (temp scratch repositories, configured
+    /// globs) that were named or remembered and therefore skipped.
+    ignored: usize,
 }
 
 /// What the daemon remembers about one worktree between fixup ticks.
@@ -3102,6 +3106,11 @@ pub struct ActorDaemonCoordinator {
     /// Families and fixup cursors remembered across restarts; `None` when the
     /// database could not be opened (fixup then only covers this process).
     repo_family_store: Option<Arc<crate::daemon::repo_family_store::RepoFamilyStore>>,
+    /// Repositories the untraced-commit fixup leaves alone (temp scratch repos,
+    /// configured globs); consulted only by the fixup scheduler and store, and
+    /// rebuilt from a fresh config read on each maintenance round so a config
+    /// change takes effect within the hour rather than at the next restart.
+    untraced_fixup_ignore: Mutex<crate::daemon::untraced_fixup_ignore::UntracedFixupIgnore>,
     /// Worktree git dirs whose fixup cursor must not be persisted again this
     /// lifetime: a pass had a side effect fail, and the durable cursor has to
     /// stay behind that commit so a later lifetime can retry it.
@@ -3262,6 +3271,7 @@ impl ActorDaemonCoordinator {
             telemetry_worker: None,
             repo_family_store: None,
             untraced_persistence_blocked: Mutex::new(HashSet::new()),
+            untraced_fixup_ignore: Mutex::new(Default::default()),
             stream_worker: None,
             token_usage_worker: None,
             transcript_shutdown_notify: std::sync::OnceLock::new(),
@@ -5662,16 +5672,26 @@ impl ActorDaemonCoordinator {
                 },
             )
             .await?;
-        if maintenance
-            && let Some(count) = self
+        if maintenance {
+            // Rows for repositories the fixup now ignores (scratch repos from
+            // before this rule, or newly configured globs) are forgotten here.
+            let ignore = self.untraced_fixup_ignore()?;
+            if let Some(count) = self
                 .with_repo_family_store(move |store| {
+                    let forgotten: Vec<String> = store
+                        .known_families(true)?
+                        .into_iter()
+                        .filter(|family| ignore.ignores(family))
+                        .collect();
+                    store.forget_families(&forgotten)?;
                     store.prune(now_secs)?;
                     store.family_count()
                 })
                 .await?
-        {
-            self.known_repo_families
-                .store(count as u64, Ordering::Relaxed);
+            {
+                self.known_repo_families
+                    .store(count as u64, Ordering::Relaxed);
+            }
         }
         Ok(schedule)
     }
@@ -5685,11 +5705,18 @@ impl ActorDaemonCoordinator {
     ) -> Result<UntracedScanSchedule, GitAiError> {
         let now_secs = crate::utils::unix_timestamp_now();
         let mut targets = Vec::new();
+        let mut ignored = 0;
         match repo_working_dir {
             Some(dir) => {
                 // The whole family: every worktree of the repository, with the
                 // named one included even when enumeration cannot see it.
                 let family = self.backend.resolve_family(Path::new(&dir))?;
+                if self.untraced_fixup_ignore()?.ignores(&family.0) {
+                    return Ok(UntracedScanSchedule {
+                        ignored: 1,
+                        ..UntracedScanSchedule::default()
+                    });
+                }
                 let worktree = worktree_root_for_path(Path::new(&dir)).ok_or_else(|| {
                     GitAiError::Generic(format!("{dir} is not inside a git worktree"))
                 })?;
@@ -5717,6 +5744,15 @@ impl ActorDaemonCoordinator {
                         ..
                     }
                 );
+                if maintenance {
+                    // Config edits (new globs, flag flips) apply from here on.
+                    *self.untraced_fixup_ignore.lock().map_err(|_| {
+                        GitAiError::Generic("untraced fixup ignore lock poisoned".to_string())
+                    })? = crate::daemon::untraced_fixup_ignore::UntracedFixupIgnore::from_config(
+                        &config::Config::fresh(),
+                    );
+                }
+                let ignore = self.untraced_fixup_ignore()?;
                 let mut families = self.coordinator.family_keys().await;
                 families.extend(self.remembered_families(maintenance).await?);
                 families.sort();
@@ -5745,6 +5781,12 @@ impl ActorDaemonCoordinator {
                 };
                 for family in families {
                     if known_missing.contains(&family) {
+                        continue;
+                    }
+                    // Scratch repositories (temp roots, configured globs) are
+                    // dropped before the stat and before any store write.
+                    if ignore.ignores(&family) {
+                        ignored += 1;
                         continue;
                     }
                     let common_dir = Path::new(&family);
@@ -5781,7 +5823,10 @@ impl ActorDaemonCoordinator {
             let len = targets.len();
             targets.rotate_left((rotation as usize) % len);
         }
-        let mut schedule = UntracedScanSchedule::default();
+        let mut schedule = UntracedScanSchedule {
+            ignored,
+            ..UntracedScanSchedule::default()
+        };
         let mut families = HashSet::new();
         for (family, git_dir, worktree) in targets {
             if self.family_has_pending_untraced_scan(&family, &git_dir)? {
@@ -5847,10 +5892,14 @@ impl ActorDaemonCoordinator {
         if !maintenance && let Some(cached) = self.lock_untraced_known_families()?.clone() {
             return Ok(cached);
         }
-        let remembered = self
+        let ignore = self.untraced_fixup_ignore()?;
+        let remembered: Vec<String> = self
             .with_repo_family_store(move |store| store.known_families(maintenance))
             .await?
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|family| !ignore.ignores(family))
+            .collect();
         *self.lock_untraced_known_families()? = Some(remembered.clone());
         Ok(remembered)
     }
@@ -5906,6 +5955,16 @@ impl ActorDaemonCoordinator {
                 )
             })
         }))
+    }
+
+    /// A snapshot of the fixup's ignore rules (cheap: a few paths and globs).
+    fn untraced_fixup_ignore(
+        &self,
+    ) -> Result<crate::daemon::untraced_fixup_ignore::UntracedFixupIgnore, GitAiError> {
+        self.untraced_fixup_ignore
+            .lock()
+            .map(|ignore| ignore.clone())
+            .map_err(|_| GitAiError::Generic("untraced fixup ignore lock poisoned".to_string()))
     }
 
     fn untraced_persistence_blocked(&self, git_dir_key: &str) -> Result<bool, GitAiError> {
@@ -6198,6 +6257,12 @@ impl ActorDaemonCoordinator {
                         .map_err(|_| {
                             GitAiError::Generic("command side-effect semaphore closed".to_string())
                         })?;
+                    // The rules may have started ignoring this family after the
+                    // pass was queued (a config change, a maintenance refresh).
+                    if self.untraced_fixup_ignore()?.ignores(family) {
+                        tracing::debug!(%family, "untraced fixup pass skipped: family is ignored");
+                        continue;
+                    }
                     let git_dir_key = git_dir.to_string_lossy().to_string();
                     let worktree_key = worktree.to_string_lossy().to_string();
                     let scan = self
@@ -6206,7 +6271,10 @@ impl ActorDaemonCoordinator {
                         )
                         .await;
                     let persisted = match scan {
-                        Ok(Some(cursor)) if !self.untraced_persistence_blocked(&git_dir_key)? => {
+                        Ok(Some(cursor))
+                            if !self.untraced_persistence_blocked(&git_dir_key)?
+                                && !self.untraced_fixup_ignore()?.ignores(family) =>
+                        {
                             let family = family.to_string();
                             self.cache_untraced_cursor(
                                 &git_dir_key,
@@ -10646,6 +10714,11 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     crate::daemon::telemetry_worker::set_daemon_internal_telemetry(telemetry_handle.clone());
     coordinator_inner.telemetry_worker = Some(telemetry_handle.clone());
 
+    coordinator_inner.untraced_fixup_ignore = Mutex::new(
+        crate::daemon::untraced_fixup_ignore::UntracedFixupIgnore::from_config(
+            config::Config::get(),
+        ),
+    );
     let repo_family_store_path = config.internal_dir.join("repo-families-db");
     match crate::daemon::repo_family_store::RepoFamilyStore::open(&repo_family_store_path) {
         Ok(store) => coordinator_inner.repo_family_store = Some(Arc::new(store)),
