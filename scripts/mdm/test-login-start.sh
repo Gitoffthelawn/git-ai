@@ -258,17 +258,27 @@ scenario_unusual_binary_path() {
   stop_daemon
 }
 
-# Writes a fake git-ai that fails until its Nth invocation, then hands off to
-# the real binary. Attempts are counted in $2.
-write_fake_binary() {
-  local path="$1" attempts="$2" succeed_at="$3"
+# Writes a fake git-ai that always fails and counts its invocations in $2.
+write_failing_binary() {
+  local path="$1" attempts="$2"
   cat >"$path" <<EOF
 #!/bin/sh
-n=\$(cat "$attempts" 2>/dev/null || echo 0); n=\$((n + 1)); echo "\$n" >"$attempts"
-[ "\$n" -ge $succeed_at ] || exit 1
-exec "$BIN" "\$@"
+n=\$(cat "$attempts" 2>/dev/null || echo 0); echo "\$((n + 1))" >"$attempts"
+exit 1
 EOF
   chmod +x "$path"
+}
+
+# Holds the daemon lock for $1 seconds in the background, the state a login
+# start sees while a previous daemon is still shutting down.
+hold_daemon_lock() {
+  mkdir -p "$DAEMON_DIR"
+  python3 - "$DAEMON_DIR/daemon.lock" "$1" <<'PY' &
+import fcntl, sys, time
+handle = open(sys.argv[1], "w")
+fcntl.flock(handle, fcntl.LOCK_EX)
+time.sleep(float(sys.argv[2]))
+PY
 }
 
 mechanism_failed() {
@@ -286,26 +296,27 @@ trigger_login_expect_failure() {
   esac
 }
 
-# The launcher retries bg start a few times: transient failures must end in a
-# healthy daemon, and persistent failure must surface as a failed login start.
+# `bg start --retry-secs` must ride out a lock held at login, and a binary that
+# keeps failing must surface as a failed login start.
 scenario_launcher_retry() {
-  local fake_dir="$HOME/mdm-fake" attempts="$HOME/mdm-fake/attempts"
-  mkdir -p "$fake_dir"
-
-  write_fake_binary "$fake_dir/git-ai" "$attempts" 3
-  run_mdm_script --bin "$fake_dir/git-ai"
-  wait_for 45 "daemon up after transient launcher failures" daemon_up
-  [ "$(cat "$attempts")" = 3 ] || fail "expected 3 attempts, got $(cat "$attempts")"
+  hold_daemon_lock 4
+  local holder=$!
+  sleep 1
+  run_mdm_script
+  wait_for 45 "daemon up despite a lock held at login" daemon_up
+  wait "$holder" || true
   mechanism_sane
   run_mdm_script --uninstall
   stop_daemon
 
+  local fake_dir="$HOME/mdm-fake" attempts="$HOME/mdm-fake/attempts"
+  mkdir -p "$fake_dir"
   rm -f "$attempts"
-  write_fake_binary "$fake_dir/git-ai" "$attempts" 99
+  write_failing_binary "$fake_dir/git-ai" "$attempts"
   run_mdm_script --bin "$fake_dir/git-ai" --no-start
   trigger_login_expect_failure
   wait_for 45 "persistent launcher failure reported by the login mechanism" mechanism_failed
-  [ "$(cat "$attempts")" = 5 ] || fail "expected 5 attempts, got $(cat "$attempts")"
+  [ "$(cat "$attempts")" = 1 ] || fail "launcher should invoke the binary once, got $(cat "$attempts")"
   daemon_up && fail "no daemon should be running after persistent failure"
   run_mdm_script --uninstall
   [ "$OS" != linux ] || systemctl --user reset-failed "$UNIT" 2>/dev/null || true

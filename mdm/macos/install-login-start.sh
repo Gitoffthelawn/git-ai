@@ -13,12 +13,9 @@ set -eu
 
 LABEL="com.usegitai.bg"
 DEFAULT_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-# The launcher resolves the binary at run time from GIT_AI_LOGIN_START_BIN (set
-# by --bin) or the default install location, and retries briefly so a daemon
-# that is still releasing its lock (logout/login, self-update) does not make
-# the login start give up. Paths never touch the shell command line.
-LOG_DIR='$HOME/.git-ai/internal/daemon/logs'
-COMMAND="mkdir -p \"$LOG_DIR\" && { n=0; until \"\${GIT_AI_LOGIN_START_BIN:-\$HOME/.git-ai/bin/git-ai}\" bg start; do [ \$((n+=1)) -lt 5 ] || exit 1; sleep 2; done; } >>\"$LOG_DIR/login-start.log\" 2>&1"
+# `bg start` keeps retrying for this long if a previous daemon is still
+# releasing its lock at login (fast logout/login, self-update in progress).
+RETRY_SECS=10
 
 MODE="install"
 SYSTEM=0
@@ -56,6 +53,11 @@ add_env() {
 
 xml_escape() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
+# One indented plist <string> element.
+xml_string() {
+  printf '        <string>%s</string>\n' "$(xml_escape "$1")"
 }
 
 while [ $# -gt 0 ]; do
@@ -113,9 +115,35 @@ if [ -n "$BIN" ]; then
     *"
 "*|*"$(printf '\r')"*) fail "--bin path must not contain a newline or carriage return" ;;
   esac
-  add_env "GIT_AI_LOGIN_START_BIN=$BIN"
-elif [ "$SYSTEM" -eq 0 ] && [ ! -x "$HOME/.git-ai/bin/git-ai" ]; then
-  fail "$HOME/.git-ai/bin/git-ai not found; install git-ai first or pass --bin"
+elif [ "$SYSTEM" -eq 0 ]; then
+  BIN="$HOME/.git-ai/bin/git-ai"
+  [ -x "$BIN" ] || fail "$BIN not found; install git-ai first or pass --bin"
+fi
+
+# Run the binary directly so macOS names the login item "git-ai". Only an
+# all-users agent without --bin needs a shell to resolve each user's home.
+if [ -n "$BIN" ]; then
+  PROGRAM_XML="$(xml_string "$BIN")
+$(xml_string bg)
+$(xml_string start)
+$(xml_string --retry-secs)
+$(xml_string "$RETRY_SECS")"
+else
+  PROGRAM_XML="$(xml_string /bin/sh)
+$(xml_string -c)
+$(xml_string "exec \"\$HOME/.git-ai/bin/git-ai\" bg start --retry-secs $RETRY_SECS")"
+fi
+
+# Per-user agents log `bg start` output; all-users agents have no fixed path.
+LOG_XML=""
+if [ "$SYSTEM" -eq 0 ]; then
+  LOG_DIR="$HOME/.git-ai/internal/daemon/logs"
+  mkdir -p "$LOG_DIR"
+  LOG_FILE_XML="$(xml_string "$LOG_DIR/login-start.log" | sed 's/^    //')"
+  LOG_XML="    <key>StandardOutPath</key>
+$LOG_FILE_XML
+    <key>StandardErrorPath</key>
+$LOG_FILE_XML"
 fi
 
 if [ "$HAS_PATH" -eq 0 ]; then
@@ -131,7 +159,7 @@ for pair in $ENV_VARS; do
   key="${pair%%=*}"
   value="${pair#*=}"
   ENV_XML="${ENV_XML}        <key>$(xml_escape "$key")</key>
-        <string>$(xml_escape "$value")</string>
+$(xml_string "$value")
 "
 done
 IFS="$OLD_IFS"
@@ -146,9 +174,7 @@ cat >"$PLIST" <<EOF
     <string>$LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/sh</string>
-        <string>-c</string>
-        <string>$(xml_escape "$COMMAND")</string>
+$PROGRAM_XML
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -158,6 +184,7 @@ cat >"$PLIST" <<EOF
     <true/>
     <key>ProcessType</key>
     <string>Background</string>
+$LOG_XML
     <key>EnvironmentVariables</key>
     <dict>
 ${ENV_XML}    </dict>

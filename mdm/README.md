@@ -18,9 +18,10 @@ user (that step writes the per-user trace2 config the daemon depends on).
 
 ## Why the scripts only start the daemon
 
-Every script registers the idempotent `git-ai bg start` and nothing else (the
-launchers retry it a few times, two seconds apart, in case a previous daemon is
-still releasing its lock at login). The daemon supervises itself:
+Every script registers the idempotent `git-ai bg start --retry-secs 10` and
+nothing else. The retry window covers a previous daemon that is still
+releasing its lock at login (fast logout/login, self-update in progress); the
+daemon itself supervises everything after that:
 
 - It exits 0 immediately if a daemon is already up, and refuses to start a
   second instance while the daemon **lock** is held.
@@ -35,8 +36,15 @@ invariants:
 
 - **macOS**: `AbandonProcessGroup` is `true` (launchd otherwise kills the
   daemon when `bg start` exits), `KeepAlive` is `false`, `RunAtLoad` is `true`.
+  The agent runs the `git-ai` binary directly, so Login Items & Extensions and
+  the "can run in the background" notice name `git-ai`, not `sh`. The one
+  exception is `--system` without `--bin`, which needs `/bin/sh` to resolve
+  each user's home; pass `--bin` with a shared path to avoid it.
 - **Linux**: `Type=oneshot` with `RemainAfterExit=yes` keeps the unit and its
-  cgroup (where the daemon lives) active until logout; no `Restart=`.
+  cgroup (where the daemon lives) active until logout; no `Restart=`. The unit
+  goes through a one-line `sh -c exec` because systemd rejects executable
+  paths containing quotes or parentheses; `systemctl status` shows the unit's
+  description, so this has no user-visible cost.
 - **Windows**: `-MultipleInstances IgnoreNew` so a second logon trigger cannot
   race the daemon, and the execution time limit is disabled so Task Scheduler
   never ends the instance.
@@ -53,9 +61,9 @@ install-login-start --uninstall
 - `--env KEY=VALUE` (repeatable) is written into the launch definition and
   reaches the daemon, e.g. `HTTPS_PROXY`, `GIT_AI_API_BASE_URL`.
 - `--bin PATH` points at a non-default `git-ai` binary. Any path without a
-  newline or carriage return works: on macOS and Linux it reaches the launcher
-  through the `GIT_AI_LOGIN_START_BIN` environment variable, on Windows it is
-  quoted into the launcher file.
+  newline or carriage return works: macOS and Windows quote it into the plist
+  or launcher file, Linux passes it through the `GIT_AI_LOGIN_START_BIN`
+  environment variable.
 - `--no-start` registers without starting now; the daemon starts at next login.
 - `--uninstall` removes the registration. On macOS and Windows the running
   daemon is left alone; on Linux stopping the unit stops its cgroup and thus

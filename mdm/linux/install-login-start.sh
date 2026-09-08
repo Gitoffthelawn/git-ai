@@ -8,13 +8,14 @@
 set -eu
 
 UNIT="git-ai-bg.service"
-# The launcher resolves the binary at run time from GIT_AI_LOGIN_START_BIN (set
-# by --bin) or the default install location, and retries briefly so a daemon
-# that is still releasing its lock (logout/login, self-update) does not make
-# the login start give up. Paths never touch the shell command line.
+# systemd refuses executable paths with quotes or parentheses in ExecStart, so
+# a one-line sh wrapper resolves the binary from GIT_AI_LOGIN_START_BIN (set by
+# --bin) or the default install location. `bg start` keeps retrying for
+# RETRY_SECS if a previous daemon is still releasing its lock at login.
+RETRY_SECS=10
 LAUNCH_BIN='"${GIT_AI_LOGIN_START_BIN:-$HOME/.git-ai/bin/git-ai}"'
-LAUNCH_START="n=0; until $LAUNCH_BIN bg start; do [ \$((n+=1)) -lt 5 ] || exit 1; sleep 2; done"
-LAUNCH_STOP="$LAUNCH_BIN bg shutdown"
+LAUNCH_START="exec $LAUNCH_BIN bg start --retry-secs $RETRY_SECS"
+LAUNCH_STOP="exec $LAUNCH_BIN bg shutdown"
 
 MODE="install"
 SYSTEM=0
