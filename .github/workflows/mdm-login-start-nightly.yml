@@ -53,11 +53,23 @@ jobs:
           if len(versions) < 2:
               raise SystemExit("Need at least two semver releases")
 
-          ordered = sorted(versions)
-          latest = versions[ordered[-1]]
+          # The daemon updates to whatever the `latest` channel serves, which can
+          # lag the newest GitHub release while a release is being promoted.
+          channel_url = "https://usegitai.com/worker/releases"
+          with urllib.request.urlopen(urllib.request.Request(channel_url, headers=headers)) as response:
+              channel_version = json.load(response)["channels"]["latest"]["version"]
+          channel = pattern.match(channel_version)
+          if not channel:
+              raise SystemExit(f"unexpected channel version {channel_version!r}")
+          latest_tuple = tuple(int(p) for p in channel.groups())
+          latest = "v" + ".".join(channel.groups())
+
           # Recent releases only: the daemon-driven self-update path must exist
           # in the starting version.
-          older = versions[random.choice(ordered[-6:-1])]
+          candidates = [v for v in sorted(versions) if v < latest_tuple][-5:]
+          if not candidates:
+              raise SystemExit(f"no release older than {latest}")
+          older = versions[random.choice(candidates)]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"latest={latest}\nolder={older}\n")
           print(f"latest={latest} older={older}")

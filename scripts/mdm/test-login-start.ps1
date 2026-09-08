@@ -251,15 +251,24 @@ function Hold-DaemonLock([int]$Seconds) {
 
 # `bg start --retry-secs` must ride out a lock held at logon, and a binary that
 # keeps failing must surface as a failed logon task.
+function Test-SupportsRetry {
+    return [bool]((& $Bin bg --help 2>&1 | Out-String) -match '--retry-secs')
+}
+
 function Invoke-LauncherRetryScenario {
-    $holder = Hold-DaemonLock 4
-    Start-Sleep -Seconds 1
-    Invoke-MdmScript
-    Wait-For 60 'daemon up despite a lock held at logon' { Test-DaemonUp }
-    Receive-Job $holder -Wait | Out-Null
-    Test-MechanismSane
-    Invoke-MdmScript --uninstall
-    Stop-Daemon
+    if (Test-SupportsRetry) {
+        $holder = Hold-DaemonLock 4
+        Start-Sleep -Seconds 1
+        Invoke-MdmScript
+        Wait-For 60 'daemon up despite a lock held at logon' { Test-DaemonUp }
+        Receive-Job $holder -Wait | Out-Null
+        Test-MechanismSane
+        Invoke-MdmScript --uninstall
+        Stop-Daemon
+    } else {
+        # Published releases without --retry-secs cannot ride out the lock race.
+        Write-Log "SKIP held-lock phase: $(Get-InstalledVersion) predates bg start --retry-secs"
+    }
 
     $fakeDir = Join-Path $HOME 'mdm-fake'
     New-Item -ItemType Directory -Path $fakeDir -Force | Out-Null

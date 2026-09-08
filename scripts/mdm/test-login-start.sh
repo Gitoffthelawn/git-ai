@@ -298,16 +298,23 @@ trigger_login_expect_failure() {
 
 # `bg start --retry-secs` must ride out a lock held at login, and a binary that
 # keeps failing must surface as a failed login start.
+supports_retry() { "$BIN" bg --help 2>&1 | grep -q -- --retry-secs; }
+
 scenario_launcher_retry() {
-  hold_daemon_lock 4
-  local holder=$!
-  sleep 1
-  run_mdm_script
-  wait_for 45 "daemon up despite a lock held at login" daemon_up
-  wait "$holder" || true
-  mechanism_sane
-  run_mdm_script --uninstall
-  stop_daemon
+  if supports_retry; then
+    hold_daemon_lock 4
+    local holder=$!
+    sleep 1
+    run_mdm_script
+    wait_for 45 "daemon up despite a lock held at login" daemon_up
+    wait "$holder" || true
+    mechanism_sane
+    run_mdm_script --uninstall
+    stop_daemon
+  else
+    # Published releases without --retry-secs cannot ride out the lock race.
+    log "SKIP held-lock phase: $(installed_version) predates bg start --retry-secs"
+  fi
 
   local fake_dir="$HOME/mdm-fake" attempts="$HOME/mdm-fake/attempts"
   mkdir -p "$fake_dir"
