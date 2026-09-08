@@ -214,9 +214,9 @@ function Invoke-UnusualBinaryPathScenario {
     Stop-Daemon
 }
 
-# Writes a fake git-ai.cmd that fails until its Nth invocation, then hands off
-# to the real binary. Attempts are counted in a file next to it.
-function Write-FakeBinary([string]$Path, [int]$SucceedAt) {
+# Writes a fake git-ai.cmd that always fails and counts its invocations in a
+# file next to it.
+function Write-FailingBinary([string]$Path) {
     $lines = @(
         '@echo off',
         'setlocal',
@@ -224,9 +224,7 @@ function Write-FakeBinary([string]$Path, [int]$SucceedAt) {
         'if exist "%~dp0attempts" set /p n=<"%~dp0attempts"',
         'set /a n+=1',
         '>"%~dp0attempts" echo %n%',
-        "if %n% lss $SucceedAt exit /b 1",
-        "`"$Bin`" %*",
-        'exit /b %errorlevel%'
+        'exit /b 1'
     )
     Set-Content -LiteralPath $Path -Value ($lines -join "`r`n") -Encoding ASCII
 }
@@ -237,31 +235,53 @@ function Get-Attempts([string]$Dir) {
     return 0
 }
 
-# The launcher retries bg start a few times: transient failures must end in a
-# healthy daemon, and persistent failure must surface as a failed logon task.
+# Holds the daemon lock (exclusive open, like the daemon) for a few seconds in
+# the background, the state a logon start sees while a previous daemon is still
+# shutting down.
+function Hold-DaemonLock([int]$Seconds) {
+    New-Item -ItemType Directory -Path $DaemonDir -Force | Out-Null
+    $lockPath = Join-Path $DaemonDir 'daemon.lock'
+    return Start-Job -ScriptBlock {
+        param($Path, $Secs)
+        $stream = [IO.File]::Open($Path, 'OpenOrCreate', 'ReadWrite', 'None')
+        Start-Sleep -Seconds $Secs
+        $stream.Dispose()
+    } -ArgumentList $lockPath, $Seconds
+}
+
+# `bg start --retry-secs` must ride out a lock held at logon, and a binary that
+# keeps failing must surface as a failed logon task.
+function Test-SupportsRetry {
+    return [bool]((& $Bin bg --help 2>&1 | Out-String) -match '--retry-secs')
+}
+
 function Invoke-LauncherRetryScenario {
+    if (Test-SupportsRetry) {
+        $holder = Hold-DaemonLock 4
+        Start-Sleep -Seconds 1
+        Invoke-MdmScript
+        Wait-For 60 'daemon up despite a lock held at logon' { Test-DaemonUp }
+        Receive-Job $holder -Wait | Out-Null
+        Test-MechanismSane
+        Invoke-MdmScript --uninstall
+        Stop-Daemon
+    } else {
+        # Published releases without --retry-secs cannot ride out the lock race.
+        Write-Log "SKIP held-lock phase: $(Get-InstalledVersion) predates bg start --retry-secs"
+    }
+
     $fakeDir = Join-Path $HOME 'mdm-fake'
     New-Item -ItemType Directory -Path $fakeDir -Force | Out-Null
-    $fake = Join-Path $fakeDir 'git-ai.cmd'
-
-    Write-FakeBinary $fake 3
-    Invoke-MdmScript --bin $fake
-    Wait-For 60 'daemon up after transient launcher failures' { Test-DaemonUp }
-    $attempts = Get-Attempts $fakeDir
-    if ($attempts -ne 3) { Fail "expected 3 attempts, got $attempts" }
-    Test-MechanismSane
-    Invoke-MdmScript --uninstall
-    Stop-Daemon
-
     Remove-Item (Join-Path $fakeDir 'attempts') -Force -ErrorAction SilentlyContinue
-    Write-FakeBinary $fake 99
+    $fake = Join-Path $fakeDir 'git-ai.cmd'
+    Write-FailingBinary $fake
     Invoke-MdmScript --bin $fake --no-start
     Start-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName
     Wait-TaskIdle
     $info = Get-ScheduledTaskInfo -TaskPath $TaskPath -TaskName $TaskName
     if ($info.LastTaskResult -eq 0) { Fail 'persistent launcher failure was reported as success' }
     $attempts = Get-Attempts $fakeDir
-    if ($attempts -ne 5) { Fail "expected 5 attempts, got $attempts" }
+    if ($attempts -ne 1) { Fail "launcher should invoke the binary once, got $attempts" }
     if (Test-DaemonUp) { Fail 'no daemon should be running after persistent failure' }
     Invoke-MdmScript --uninstall
     Write-Log 'launcher retry semantics verified'

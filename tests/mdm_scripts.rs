@@ -66,6 +66,10 @@ fn macos_launch_agent_abandons_process_group_and_never_keeps_alive() {
         script.contains("bg start") && !script.contains("bg run"),
         "the agent must invoke the idempotent `bg start`, never the foreground `bg run`"
     );
+    assert!(
+        script.contains(r#"$(xml_string "$BIN")"#),
+        "per-user agents must run the git-ai binary directly so macOS shows \"git-ai\", not \"sh\", as the login item"
+    );
 }
 
 #[test]
@@ -91,6 +95,10 @@ fn linux_unit_is_oneshot_that_remains_after_exit_without_restart() {
     assert!(
         script.contains("bg start") && !script.contains("bg run"),
         "the unit must invoke the idempotent `bg start`, never the foreground `bg run`"
+    );
+    assert!(
+        !script.contains("; do "),
+        "the unit must not loop itself; retries live in `bg start --retry-secs`"
     );
 }
 
@@ -118,6 +126,10 @@ fn windows_task_runs_once_per_logon_as_the_current_user_without_time_limit() {
         script.contains("bg start") && !script.contains("bg run"),
         "the task must invoke the idempotent `bg start`, never the foreground `bg run`"
     );
+    assert!(
+        !script.contains("$attempt"),
+        "the launcher must not loop itself; retries live in `bg start --retry-secs`"
+    );
 }
 
 #[test]
@@ -133,6 +145,10 @@ fn all_scripts_share_the_same_cli_contract() {
                 "{name} script must support {flag} like the other platforms"
             );
         }
+        assert!(
+            script.contains("bg start --retry-secs"),
+            "{name} launcher must let bg start retry through a login-time lock race"
+        );
     }
     for (name, script) in [("macos", macos_script()), ("linux", linux_script())] {
         assert!(
@@ -151,6 +167,7 @@ fn readme_documents_the_launch_invariants() {
         "RemainAfterExit",
         "IgnoreNew",
         "lock",
+        "--retry-secs",
         "--uninstall",
         "--env",
     ] {
