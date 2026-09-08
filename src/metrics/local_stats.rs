@@ -540,8 +540,15 @@ struct TokenBucket {
 }
 
 impl TokenBucket {
+    /// A zeroed correction revision (the bucket's entries were all removed).
+    /// Cost is checked too: a transcript-priced entry can carry a positive
+    /// `costUSD` with zero token counters, and that spend must survive.
     fn is_empty(&self) -> bool {
-        self.input == 0 && self.output == 0 && self.cache_read == 0 && self.cache_write == 0
+        self.input == 0
+            && self.output == 0
+            && self.cache_read == 0
+            && self.cache_write == 0
+            && self.cost_micro_usd == 0
     }
 }
 
@@ -625,8 +632,10 @@ fn build_token_summary(
             continue;
         }
         // The DB window filters on emission time; a late re-emission can carry
-        // a bucket whose usage predates the window.
-        if since_ts > 0 && bucket_ts < since_ts as u64 {
+        // a bucket whose usage predates the window. Keep any bucket that
+        // overlaps the window, including the partial one straddling its start.
+        let bucket_end = bucket_ts + crate::token_usage::types::BUCKET_SECS as u64;
+        if since_ts > 0 && bucket_end <= since_ts as u64 {
             continue;
         }
 
@@ -1402,6 +1411,69 @@ mod tests {
         assert_eq!(stats.tokens.by_model[1].model, "mystery-model");
         assert_eq!(stats.tokens.by_model[1].input, 40);
         assert_eq!(stats.tokens.by_model[1].estimated_cost_usd, None);
+    }
+
+    #[test]
+    fn cost_only_token_buckets_keep_their_spend() {
+        let now = now_ts();
+        let bucket_ts = (now.saturating_sub(600) as u64 / 300) * 300;
+        // A transcript-priced entry can carry costUSD with zero token
+        // counters; the spend must not be mistaken for a zeroed correction.
+        let records = [token_usage(
+            now - 500,
+            None,
+            "session-1",
+            "claude-sonnet-4-6",
+            bucket_ts,
+            1,
+            [0, 0, 0, 0],
+            750_000,
+        )];
+        let refs: Vec<&MetricHistoryRecord> = records.iter().collect();
+
+        let stats = compute_activity_from_records(
+            &refs,
+            now.saturating_sub(24 * 3600),
+            "last 1 day".to_string(),
+            BucketGranularity::Daily,
+        )
+        .unwrap();
+
+        assert!((stats.tokens.estimated_cost_usd - 0.75).abs() < 1e-12);
+        assert_eq!(stats.tokens.by_model[0].model, "claude-sonnet-4-6");
+        assert_eq!(stats.tokens.by_model[0].estimated_cost_usd, Some(0.75));
+    }
+
+    #[test]
+    fn token_bucket_straddling_the_window_start_is_included() {
+        let now = now_ts();
+        // since_ts falls strictly inside the bucket's 5-minute span: usage
+        // after the boundary must not disappear with the bucket.
+        let bucket_ts = (now.saturating_sub(24 * 3600) as u64 / 300) * 300;
+        let since_ts = bucket_ts as u32 + 100;
+        let records = [token_usage(
+            now - 60,
+            None,
+            "session-1",
+            "claude-sonnet-4-6",
+            bucket_ts,
+            1,
+            [100, 50, 0, 0],
+            1_000_000,
+        )];
+        let refs: Vec<&MetricHistoryRecord> = records.iter().collect();
+
+        let stats = compute_activity_from_records(
+            &refs,
+            since_ts,
+            "last 1 day".to_string(),
+            BucketGranularity::Daily,
+        )
+        .unwrap();
+
+        assert_eq!(stats.tokens.input, 100);
+        assert_eq!(stats.tokens.output, 50);
+        assert!((stats.tokens.estimated_cost_usd - 1.0).abs() < 1e-12);
     }
 
     #[test]
