@@ -77,7 +77,9 @@ fn handle_start(args: &[String]) -> Result<(), String> {
         return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
     let retry_window = start_retry_window(args)?;
-    let deadline = Instant::now() + retry_window;
+    let deadline = Instant::now()
+        .checked_add(retry_window)
+        .ok_or_else(|| "--retry-secs is too large".to_string())?;
     loop {
         match ensure_daemon_running_attached(daemon_startup_timeout()) {
             Ok(_) => return Ok(()),

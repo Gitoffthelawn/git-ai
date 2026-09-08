@@ -743,4 +743,19 @@ fn daemon_start_rejects_invalid_retry_window() {
         "stderr should name the bad flag: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    let output = daemon_command_output(
+        &repo,
+        &["bg", "start", "--retry-secs", &u64::MAX.to_string()],
+        repo.test_home_path(),
+    );
+    assert!(
+        !output.status.success(),
+        "an overflowing --retry-secs must be rejected, not panic"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--retry-secs is too large"),
+        "stderr should explain the rejected window: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
